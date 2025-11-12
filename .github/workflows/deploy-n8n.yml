@@ -2,7 +2,7 @@ name: CI - Build & Push Image
 
 on:
   push:
-    branches: ['master']
+    branches: ['main', 'master']
   workflow_dispatch:
 
 env:
@@ -17,6 +17,20 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.3
+
+      - name: Build n8n (generate ./compiled)
+        run: node scripts/build-n8n.mjs
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
