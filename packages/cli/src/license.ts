@@ -218,7 +218,12 @@ export class License implements LicenseProvider {
 	}
 
 	isLicensed(feature: BooleanLicenseFeature) {
-		return this.manager?.hasFeatureEnabled(feature) ?? false;
+		// Siempre activado: habilita todas las features positivas.
+		// Cuidado con flags negativas: no habilitar API_DISABLED.
+		if (feature === LICENSE_FEATURES.API_DISABLED) return false;
+		// Ocultar banner de no-producción aunque la licencia esté activa
+		if (feature === LICENSE_FEATURES.SHOW_NON_PROD_BANNER) return false;
+		return true;
 	}
 
 	/** @deprecated Use `LicenseState.isSharingLicensed` instead. */
@@ -341,6 +346,14 @@ export class License implements LicenseProvider {
 	}
 
 	getValue<T extends keyof FeatureReturnType>(feature: T): FeatureReturnType[T] {
+		// Siempre activado: devolver cuotas ilimitadas y plan Enterprise.
+		const key = feature as string;
+		if (key === 'planName') {
+			return 'Enterprise' as FeatureReturnType[T];
+		}
+		if (key.startsWith('quota:')) {
+			return UNLIMITED_LICENSE_QUOTA as FeatureReturnType[T];
+		}
 		return this.manager?.getFeatureValue(feature) as FeatureReturnType[T];
 	}
 
@@ -411,7 +424,7 @@ export class License implements LicenseProvider {
 	}
 
 	getPlanName(): string {
-		return this.getValue('planName') ?? 'Community';
+		return 'Enterprise';
 	}
 
 	getInfo(): string {
