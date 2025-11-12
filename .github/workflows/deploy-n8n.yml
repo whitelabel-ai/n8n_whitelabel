@@ -22,12 +22,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'pnpm'
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10.18.3
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Build n8n (generate ./compiled)
         run: node scripts/build-n8n.mjs
