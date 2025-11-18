@@ -25,6 +25,50 @@ interface IGraphqlBody {
 	variables: IDataObject;
 }
 
+export const normalizeMondayItem = (item: IDataObject): IDataObject => {
+	const mapColumnValues = (cvs: IDataObject[] | undefined) =>
+		(cvs || []).map((cv) => {
+			const column = (cv.column as IDataObject) || {};
+			return {
+				id: cv.id,
+				value: cv.value,
+				text: cv.text,
+				title: column.title,
+				additional_info: column.settings_str,
+			} as IDataObject;
+		});
+
+	const parent = item.parent_item as IDataObject | undefined;
+	const normalizedParent = parent
+		? {
+				id: parent.id,
+				name: parent.name,
+				created_at: parent.created_at,
+				updated_at: parent.updated_at,
+				state: parent.state,
+				board: parent.board,
+				creator_id: parent.creator_id,
+				group: parent.group,
+				column_values: mapColumnValues(parent.column_values as IDataObject[]),
+			}
+		: undefined;
+
+	return {
+		id: item.id,
+		name: item.name,
+		email: item.email,
+		created_at: item.created_at,
+		updated_at: item.updated_at,
+		state: item.state,
+		board: item.board,
+		creator_id: item.creator_id,
+		group: item.group,
+		column_values: mapColumnValues(item.column_values as IDataObject[]),
+		assets: (item.assets as IDataObject[]) || [],
+		parent_item: normalizedParent,
+	} as IDataObject;
+};
+
 export class MondayCom implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Monday.com',
@@ -591,32 +635,52 @@ export class MondayCom implements INodeType {
 
 						const body: IGraphqlBody = {
 							query: `query ($itemId: [ID!]){
-									items (ids: $itemId) {
-										id
-										name
-										created_at
-										state
-										column_values {
-											id
-											text
-											type
-											value
-											column {
-
-												title
-												archived
-												description
-												settings_str
-											}
-										}
-									}
-								}`,
+                                    items (ids: $itemId) {
+                                        id
+                                        name
+                                        email
+                                        created_at
+                                        updated_at
+                                        state
+                                        board { id }
+                                        creator_id
+                                        group { id title deleted archived }
+                                        column_values {
+                                            id
+                                            text
+                                            value
+                                            column {
+                                                title
+                                                settings_str
+                                            }
+                                        }
+                                        assets { id name url }
+                                        parent_item {
+                                            id
+                                            name
+                                            created_at
+                                            updated_at
+                                            state
+                                            board { id }
+                                            creator_id
+                                            group { id }
+                                            column_values {
+                                                id
+                                                text
+                                                value
+                                                column { title settings_str }
+                                            }
+                                        }
+                                    }
+                                }`,
 							variables: {
 								itemId: itemIds,
 							},
 						};
 						responseData = await mondayComApiRequest.call(this, body);
-						responseData = responseData.data.items;
+						responseData = (responseData.data.items as IDataObject[]).map((item) =>
+							normalizeMondayItem(item as IDataObject),
+						);
 					}
 					if (operation === 'getAll') {
 						const boardId = this.getNodeParameter('boardId', i);
@@ -624,25 +688,25 @@ export class MondayCom implements INodeType {
 						const returnAll = this.getNodeParameter('returnAll', i);
 
 						const fieldsToReturn = `
-						{
-							id
-							name
-							created_at
-							state
-							column_values {
-								id
-								text
-								type
-								value
-								column {
-									title
-									archived
-									description
-									settings_str
-								}
-							}
-						}
-						`;
+                        {
+                            id
+                            name
+                            email
+                            created_at
+                            updated_at
+                            state
+                            board { id }
+                            creator_id
+                            group { id title deleted archived }
+                            column_values {
+                                id
+                                text
+                                value
+                                column { title settings_str }
+                            }
+                            assets { id name url }
+                        }
+                        `;
 
 						const body = {
 							query: `query ($boardId: [ID!], $groupId: [String], $limit: Int) {
@@ -675,6 +739,9 @@ export class MondayCom implements INodeType {
 							responseData = await mondayComApiRequest.call(this, body);
 							responseData = responseData.data.boards[0].groups[0].items_page.items;
 						}
+						responseData = (responseData as IDataObject[]).map((item) =>
+							normalizeMondayItem(item as IDataObject),
+						);
 					}
 					if (operation === 'getByColumnValue') {
 						const boardId = this.getNodeParameter('boardId', i);
@@ -683,26 +750,23 @@ export class MondayCom implements INodeType {
 						const returnAll = this.getNodeParameter('returnAll', i);
 
 						const fieldsToReturn = `{
-							id
-							name
-							created_at
-							state
-							board {
-								id
-							}
-							column_values {
-								id
-								text
-								type
-								value
-								column {
-									title
-									archived
-									description
-									settings_str
-								}
-							}
-						}`;
+                            id
+                            name
+                            email
+                            created_at
+                            updated_at
+                            state
+                            board { id }
+                            creator_id
+                            group { id title deleted archived }
+                            column_values {
+                                id
+                                text
+                                value
+                                column { title settings_str }
+                            }
+                            assets { id name url }
+                        }`;
 						const body = {
 							query: `query ($boardId: ID!, $columnId: String!, $columnValue: String!, $limit: Int) {
 								items_page_by_column_values(
@@ -734,6 +798,9 @@ export class MondayCom implements INodeType {
 							responseData = await mondayComApiRequest.call(this, body);
 							responseData = responseData.data.items_page_by_column_values.items;
 						}
+						responseData = (responseData as IDataObject[]).map((item) =>
+							normalizeMondayItem(item as IDataObject),
+						);
 					}
 					if (operation === 'move') {
 						const groupId = this.getNodeParameter('groupId', i) as string;
