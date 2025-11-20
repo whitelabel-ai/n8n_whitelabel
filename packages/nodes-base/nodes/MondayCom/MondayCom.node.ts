@@ -33,10 +33,56 @@ export const normalizeMondayItem = (item: IDataObject): IDataObject => {
 				id: cv.id,
 				value: cv.value,
 				text: cv.text,
+				display_value: cv.display_value,
 				title: column.title,
 				additional_info: column.settings_str,
+				linked_item_ids: (cv.linked_item_ids as string[]) || undefined,
 			} as IDataObject;
 		});
+
+	const buildMappables = (cvs: IDataObject[] | undefined) => {
+		const out: IDataObject = {};
+		for (const cv of cvs || []) {
+			const v = cv.value as string | null | undefined;
+			const t = cv.text as string | null | undefined;
+			const dv = (cv.display_value as string | null | undefined) ?? undefined;
+			const linkedIds = (cv.linked_item_ids as string[] | undefined) ?? undefined;
+			let mapped: IDataObject | string | null = t ?? dv ?? null;
+			if (typeof v === 'string') {
+				try {
+					const obj = JSON.parse(v);
+					const objOut = obj as IDataObject;
+					if (t !== undefined && t !== null) objOut.text = t as string;
+					if (dv !== undefined && dv !== null) objOut.display_value = dv as string;
+					if (linkedIds && Array.isArray(linkedIds)) objOut.linked_item_ids = linkedIds as string[];
+					mapped = obj as IDataObject;
+				} catch (_e) {
+					mapped = t ?? dv ?? v;
+				}
+			}
+			if (!v && linkedIds) {
+				mapped = { linked_item_ids: linkedIds, text: t ?? dv ?? null } as IDataObject;
+			}
+			out[cv.id as string] = mapped as unknown as IDataObject;
+		}
+		return out;
+	};
+
+	const normalizeSubitem = (si: IDataObject) => {
+		const cvs = si.column_values as IDataObject[];
+		return {
+			id: si.id,
+			name: si.name,
+			created_at: si.created_at,
+			updated_at: si.updated_at,
+			state: si.state,
+			board: si.board,
+			creator_id: si.creator_id,
+			group: si.group,
+			column_values: mapColumnValues(cvs),
+			mappable_column_values: buildMappables(cvs),
+		} as IDataObject;
+	};
 
 	const parent = item.parent_item as IDataObject | undefined;
 	const normalizedParent = parent
@@ -53,6 +99,54 @@ export const normalizeMondayItem = (item: IDataObject): IDataObject => {
 			}
 		: undefined;
 
+	const subitemsRaw = (item.subitems as IDataObject[]) || [];
+	const subitems = subitemsRaw.map((si) => normalizeSubitem(si));
+
+	const itemCvs = mapColumnValues(item.column_values as IDataObject[]);
+	const itemMappables = buildMappables(item.column_values as IDataObject[]);
+
+	for (const cv of itemCvs) {
+		const infoStr = cv.additional_info as string | undefined;
+		if (!infoStr) continue;
+		let infoObj: IDataObject | undefined;
+		try {
+			infoObj = JSON.parse(infoStr) as IDataObject;
+		} catch (_e) {
+			infoObj = undefined;
+		}
+		if (!infoObj) continue;
+		const relation = (infoObj.relation_column as IDataObject) || {};
+		const isSubelements = !!relation.subelementos;
+		if (!isSubelements) continue;
+		const dlc = infoObj.displayed_linked_columns as IDataObject | undefined;
+		if (!dlc) continue;
+		const boardIds = Object.keys(dlc);
+		if (boardIds.length === 0) continue;
+		const targetCols = (dlc[boardIds[0]] as string[]) || [];
+		if (targetCols.length === 0) continue;
+		const targetCol = targetCols[0];
+		const values: string[] = [];
+		let sum: number | null = null;
+		for (const si of subitems as IDataObject[]) {
+			const mm = si.mappable_column_values as IDataObject;
+			const val = mm[targetCol];
+			let textVal: string | null = null;
+			if (val && typeof val === 'object' && (val as IDataObject).text !== undefined) {
+				textVal = ((val as IDataObject).text as string) ?? null;
+			} else if (typeof val === 'string') {
+				textVal = val as string;
+			} else if (val === null || val === undefined) {
+				textVal = null;
+			}
+			if (textVal && textVal !== '') values.push(textVal);
+			const numeric =
+				textVal !== null && textVal !== '' && !isNaN(Number(textVal)) ? Number(textVal) : null;
+			if (numeric !== null) sum = (sum ?? 0) + numeric;
+		}
+		cv.text = values.length > 0 ? values.join(', ') : null;
+		cv.value = sum !== null ? JSON.stringify(String(sum)) : cv.value;
+	}
+
 	return {
 		id: item.id,
 		name: item.name,
@@ -63,9 +157,11 @@ export const normalizeMondayItem = (item: IDataObject): IDataObject => {
 		board: item.board,
 		creator_id: item.creator_id,
 		group: item.group,
-		column_values: mapColumnValues(item.column_values as IDataObject[]),
+		column_values: itemCvs,
+		mappable_column_values: itemMappables,
 		assets: (item.assets as IDataObject[]) || [],
 		parent_item: normalizedParent,
+		subitems,
 	} as IDataObject;
 };
 
@@ -653,6 +749,10 @@ export class MondayCom implements INodeType {
                                                 title
                                                 settings_str
                                             }
+                                            ... on BoardRelationValue {
+                                                linked_item_ids
+                                                display_value
+                                            }
                                         }
                                         assets { id name url }
                                         parent_item {
@@ -669,6 +769,30 @@ export class MondayCom implements INodeType {
                                                 text
                                                 value
                                                 column { title settings_str }
+                                                ... on BoardRelationValue {
+                                                    linked_item_ids
+                                                    display_value
+                                                }
+                                            }
+                                        }
+                                        subitems {
+                                            id
+                                            name
+                                            created_at
+                                            updated_at
+                                            state
+                                            board { id }
+                                            creator_id
+                                            group { id }
+                                            column_values {
+                                                id
+                                                text
+                                                value
+                                                column { title settings_str }
+                                                ... on BoardRelationValue {
+                                                    linked_item_ids
+                                                    display_value
+                                                }
                                             }
                                         }
                                     }
@@ -678,9 +802,128 @@ export class MondayCom implements INodeType {
 							},
 						};
 						responseData = await mondayComApiRequest.call(this, body);
-						responseData = (responseData.data.items as IDataObject[]).map((item) =>
+						let itemsData = (responseData.data.items as IDataObject[]).map((item) =>
 							normalizeMondayItem(item as IDataObject),
 						);
+						const allLinkedIds: Set<string> = new Set();
+						for (const it of itemsData as IDataObject[]) {
+							const cvs = (it.column_values as IDataObject[]) || [];
+							for (const cv of cvs) {
+								const ids = (cv.linked_item_ids as string[] | undefined) || [];
+								for (const id of ids) allLinkedIds.add(String(id));
+							}
+						}
+						let linkedItemsById: Record<string, IDataObject> = {};
+						if (allLinkedIds.size > 0) {
+							const q: IGraphqlBody = {
+								query: `query ($ids: [ID!]){
+                                        items(ids: $ids){
+                                            id
+                                            name
+                                            board { id }
+                                            column_values { id text value }
+                                        }
+                                    }`,
+								variables: { ids: Array.from(allLinkedIds) },
+							};
+							const linkedResp = await mondayComApiRequest.call(this, q);
+							const linkedItems = (linkedResp.data.items as IDataObject[]) || [];
+							linkedItemsById = Object.fromEntries(
+								linkedItems.map((li) => [String(li.id), li as IDataObject]),
+							);
+						}
+						itemsData = (itemsData as IDataObject[]).map((it) => {
+							const cvs = (it.column_values as IDataObject[]) || [];
+							const mappables = (it.mappable_column_values as IDataObject) || {};
+							for (const cv of cvs) {
+								const infoStr = cv.additional_info as string | undefined;
+								if (!infoStr) continue;
+								let infoObj: IDataObject | undefined;
+								try {
+									infoObj = JSON.parse(infoStr) as IDataObject;
+								} catch (_e) {
+									infoObj = undefined;
+								}
+								if (!infoObj) continue;
+								const linkedIds = ((cv.linked_item_ids as string[]) || []).map((id) => String(id));
+								if (
+									(cv.text === null || cv.text === undefined || cv.text === '') &&
+									linkedIds.length > 0
+								) {
+									const names = linkedIds
+										.map((id) =>
+											linkedItemsById[id] ? String(linkedItemsById[id].name ?? '') : '',
+										)
+										.filter((s) => s && s !== '');
+									const display = (cv.display_value as string | undefined) || undefined;
+									if (display && display.trim() !== '') cv.text = display;
+									else if (names.length > 0) cv.text = names.join(', ');
+								}
+								const cur = mappables[cv.id as string] as IDataObject | undefined;
+								if (cur && typeof cur === 'object') {
+									const display = (cv.display_value as string | undefined) || undefined;
+									if (display && display.trim() !== '') (cur as IDataObject).text = display;
+								}
+								const relation = (infoObj.relation_column as IDataObject) || {};
+								const isConnectBoards = Object.keys(relation).length > 0;
+								if (!isConnectBoards) continue;
+								const dlc = infoObj.displayed_linked_columns as IDataObject | undefined;
+								if (!dlc) continue;
+								const boardIds = Object.keys(dlc);
+								if (boardIds.length === 0) continue;
+								const targetCols = (dlc[boardIds[0]] as string[]) || [];
+								if (targetCols.length === 0) continue;
+								const targetCol = targetCols[0];
+								const relationIds = Object.keys(relation).filter(
+									(k) => (relation as IDataObject)[k] === true,
+								);
+								let idsToUse = Object.keys(linkedItemsById);
+								if (relationIds.length > 0) {
+									const specific: string[] = [];
+									for (const rid of relationIds) {
+										const relCv = cvs.find((c) => c.id === rid);
+										const relIds = (relCv?.linked_item_ids as string[] | undefined) || [];
+										for (const id of relIds) specific.push(String(id));
+									}
+									if (specific.length > 0) idsToUse = Array.from(new Set(specific));
+								}
+								const values: string[] = [];
+								let sum: number | null = null;
+								for (const id of idsToUse) {
+									const li = linkedItemsById[id];
+									const b = (li.board as IDataObject) || {};
+									if (String(b.id) !== boardIds[0]) continue;
+									const lcv = (li.column_values as IDataObject[]) || [];
+									const target = lcv.find((c) => c.id === targetCol);
+									if (!target) continue;
+									let t = (target.text as string | null | undefined) ?? null;
+									if (!t) {
+										const vRaw = target.value as string | null | undefined;
+										if (typeof vRaw === 'string') {
+											try {
+												const parsed = JSON.parse(vRaw) as IDataObject | string;
+												if (typeof parsed === 'string') {
+													t = parsed as string;
+												} else if (parsed && typeof parsed === 'object') {
+													const po = parsed as IDataObject;
+													if (typeof po.email === 'string') t = po.email as string;
+													else if (typeof po.text === 'string') t = po.text as string;
+												}
+											} catch (_e) {
+												t = vRaw as string;
+											}
+										}
+									}
+									if (t && t !== '') values.push(t);
+									const numeric = t !== null && t !== '' && !isNaN(Number(t)) ? Number(t) : null;
+									if (numeric !== null) sum = (sum ?? 0) + numeric;
+								}
+								cv.text = values.length > 0 ? values.join(', ') : (cv.text ?? null);
+								cv.value = sum !== null ? JSON.stringify(String(sum)) : cv.value;
+							}
+							return it;
+						});
+						responseData = itemsData;
 					}
 					if (operation === 'getAll') {
 						const boardId = this.getNodeParameter('boardId', i);
@@ -703,8 +946,32 @@ export class MondayCom implements INodeType {
                                 text
                                 value
                                 column { title settings_str }
+                                ... on BoardRelationValue {
+                                    linked_item_ids
+                                    display_value
+                                }
                             }
                             assets { id name url }
+                            subitems {
+                                id
+                                name
+                                created_at
+                                updated_at
+                                state
+                                board { id }
+                                creator_id
+                                group { id }
+                                column_values {
+                                    id
+                                    text
+                                    value
+                                    column { title settings_str }
+                                    ... on BoardRelationValue {
+                                        linked_item_ids
+                                        display_value
+                                    }
+                                }
+                            }
                         }
                         `;
 
@@ -742,6 +1009,149 @@ export class MondayCom implements INodeType {
 						responseData = (responseData as IDataObject[]).map((item) =>
 							normalizeMondayItem(item as IDataObject),
 						);
+						{
+							const itemsData = responseData as IDataObject[];
+							const allLinkedIds: Set<string> = new Set();
+							for (const it of itemsData) {
+								const cvs = (it.column_values as IDataObject[]) || [];
+								for (const cv of cvs) {
+									const ids = (cv.linked_item_ids as string[] | undefined) || [];
+									for (const id of ids) allLinkedIds.add(String(id));
+									const v = cv.value as string | null | undefined;
+									if (typeof v === 'string') {
+										try {
+											const obj = JSON.parse(v) as IDataObject;
+											const lp = (obj.linkedPulseIds as IDataObject[]) || [];
+											for (const p of lp) {
+												const id = String((p as IDataObject).linkedPulseId);
+												if (id) allLinkedIds.add(id);
+											}
+										} catch {}
+									}
+								}
+							}
+							let linkedItemsById: Record<string, IDataObject> = {};
+							if (allLinkedIds.size > 0) {
+								const q: IGraphqlBody = {
+									query: `query ($ids: [ID!]){ items(ids: $ids){ id name board { id } column_values { id text value } } }`,
+									variables: { ids: Array.from(allLinkedIds) },
+								};
+								const linkedResp = await mondayComApiRequest.call(this, q);
+								const linkedItems = (linkedResp.data.items as IDataObject[]) || [];
+								linkedItemsById = Object.fromEntries(
+									linkedItems.map((li) => [String(li.id), li as IDataObject]),
+								);
+							}
+							responseData = itemsData.map((it) => {
+								const cvs = (it.column_values as IDataObject[]) || [];
+								const mappables = (it.mappable_column_values as IDataObject) || {};
+								for (const cv of cvs) {
+									const infoStr = cv.additional_info as string | undefined;
+									if (!infoStr) continue;
+									let infoObj: IDataObject | undefined;
+									try {
+										infoObj = JSON.parse(infoStr) as IDataObject;
+									} catch {
+										infoObj = undefined;
+									}
+									if (!infoObj) continue;
+									const linkedIds = ((cv.linked_item_ids as string[]) || []).map((id) =>
+										String(id),
+									);
+									if (
+										(cv.text === null || cv.text === undefined || cv.text === '') &&
+										linkedIds.length > 0
+									) {
+										const names = linkedIds
+											.map((id) =>
+												linkedItemsById[id] ? String(linkedItemsById[id].name ?? '') : '',
+											)
+											.filter((s) => s && s !== '');
+										const display = (cv.display_value as string | undefined) || undefined;
+										if (display && display.trim() !== '') cv.text = display;
+										else if (names.length > 0) cv.text = names.join(', ');
+									}
+									const cur = mappables[cv.id as string] as IDataObject | undefined;
+									if (cur && typeof cur === 'object') {
+										const display = (cv.display_value as string | undefined) || undefined;
+										if (display && display.trim() !== '') (cur as IDataObject).text = display;
+									}
+									const relation = (infoObj.relation_column as IDataObject) || {};
+									const isConnectBoards = Object.keys(relation).length > 0;
+									if (!isConnectBoards) continue;
+									const dlc = infoObj.displayed_linked_columns as IDataObject | undefined;
+									if (!dlc) continue;
+									const boardIds = Object.keys(dlc);
+									if (boardIds.length === 0) continue;
+									const targetCols = (dlc[boardIds[0]] as string[]) || [];
+									if (targetCols.length === 0) continue;
+									const targetCol = targetCols[0];
+									const relationIds = Object.keys(relation).filter(
+										(k) => (relation as IDataObject)[k] === true,
+									);
+									let idsToUse = Object.keys(linkedItemsById);
+									if (relationIds.length > 0) {
+										const specific: string[] = [];
+										for (const rid of relationIds) {
+											const relCv = cvs.find((c) => c.id === rid);
+											const relIdsA = (relCv?.linked_item_ids as string[] | undefined) || [];
+											for (const id of relIdsA) specific.push(String(id));
+											const vRel = relCv?.value as string | null | undefined;
+											if (typeof vRel === 'string') {
+												try {
+													const obj = JSON.parse(vRel) as IDataObject;
+													const lp = (obj.linkedPulseIds as IDataObject[]) || [];
+													for (const p of lp) {
+														const id = String((p as IDataObject).linkedPulseId);
+														if (id) specific.push(id);
+													}
+												} catch {}
+											}
+										}
+										if (specific.length > 0) idsToUse = Array.from(new Set(specific));
+									}
+									const values: string[] = [];
+									let sum: number | null = null;
+									for (const id of idsToUse) {
+										const li = linkedItemsById[id];
+										if (!li) continue;
+										const b = (li.board as IDataObject) || {};
+										if (String(b.id) !== boardIds[0]) continue;
+										const lcv = (li.column_values as IDataObject[]) || [];
+										const target = lcv.find((c) => c.id === targetCol);
+										if (!target) continue;
+										let t = (target.text as string | null | undefined) ?? null;
+										if (!t) {
+											const vRaw = target.value as string | null | undefined;
+											if (typeof vRaw === 'string') {
+												try {
+													const parsed = JSON.parse(vRaw) as IDataObject | string;
+													if (typeof parsed === 'string') t = parsed as string;
+													else if (parsed && typeof parsed === 'object') {
+														const po = parsed as IDataObject;
+														if (typeof po.email === 'string') t = po.email as string;
+														else if (typeof po.text === 'string') t = po.text as string;
+													}
+												} catch {
+													t = vRaw as string;
+												}
+											}
+										}
+										if (t && t !== '') values.push(t);
+										const numeric = t !== null && t !== '' && !isNaN(Number(t)) ? Number(t) : null;
+										if (numeric !== null) sum = (sum ?? 0) + numeric;
+									}
+									const aggregatedText = values.length > 0 ? values.join(', ') : (cv.text ?? null);
+									cv.text = aggregatedText;
+									cv.value = sum !== null ? JSON.stringify(String(sum)) : cv.value;
+									const curAgg = mappables[cv.id as string] as IDataObject | undefined;
+									if (curAgg && typeof curAgg === 'object') {
+										(curAgg as IDataObject).text = aggregatedText as string | null;
+									}
+								}
+								return it;
+							});
+						}
 					}
 					if (operation === 'getByColumnValue') {
 						const boardId = this.getNodeParameter('boardId', i);
@@ -764,8 +1174,32 @@ export class MondayCom implements INodeType {
                                 text
                                 value
                                 column { title settings_str }
+                                ... on BoardRelationValue {
+                                    linked_item_ids
+                                    display_value
+                                }
                             }
                             assets { id name url }
+                            subitems {
+                                id
+                                name
+                                created_at
+                                updated_at
+                                state
+                                board { id }
+                                creator_id
+                                group { id }
+                                column_values {
+                                    id
+                                    text
+                                    value
+                                    column { title settings_str }
+                                    ... on BoardRelationValue {
+                                        linked_item_ids
+                                        display_value
+                                    }
+                                }
+                            }
                         }`;
 						const body = {
 							query: `query ($boardId: ID!, $columnId: String!, $columnValue: String!, $limit: Int) {
@@ -801,6 +1235,149 @@ export class MondayCom implements INodeType {
 						responseData = (responseData as IDataObject[]).map((item) =>
 							normalizeMondayItem(item as IDataObject),
 						);
+						{
+							const itemsData = responseData as IDataObject[];
+							const allLinkedIds: Set<string> = new Set();
+							for (const it of itemsData) {
+								const cvs = (it.column_values as IDataObject[]) || [];
+								for (const cv of cvs) {
+									const ids = (cv.linked_item_ids as string[] | undefined) || [];
+									for (const id of ids) allLinkedIds.add(String(id));
+									const v = cv.value as string | null | undefined;
+									if (typeof v === 'string') {
+										try {
+											const obj = JSON.parse(v) as IDataObject;
+											const lp = (obj.linkedPulseIds as IDataObject[]) || [];
+											for (const p of lp) {
+												const id = String((p as IDataObject).linkedPulseId);
+												if (id) allLinkedIds.add(id);
+											}
+										} catch {}
+									}
+								}
+							}
+							let linkedItemsById: Record<string, IDataObject> = {};
+							if (allLinkedIds.size > 0) {
+								const q: IGraphqlBody = {
+									query: `query ($ids: [ID!]){ items(ids: $ids){ id name board { id } column_values { id text value } } }`,
+									variables: { ids: Array.from(allLinkedIds) },
+								};
+								const linkedResp = await mondayComApiRequest.call(this, q);
+								const linkedItems = (linkedResp.data.items as IDataObject[]) || [];
+								linkedItemsById = Object.fromEntries(
+									linkedItems.map((li) => [String(li.id), li as IDataObject]),
+								);
+							}
+							responseData = itemsData.map((it) => {
+								const cvs = (it.column_values as IDataObject[]) || [];
+								const mappables = (it.mappable_column_values as IDataObject) || {};
+								for (const cv of cvs) {
+									const infoStr = cv.additional_info as string | undefined;
+									if (!infoStr) continue;
+									let infoObj: IDataObject | undefined;
+									try {
+										infoObj = JSON.parse(infoStr) as IDataObject;
+									} catch {
+										infoObj = undefined;
+									}
+									if (!infoObj) continue;
+									const linkedIds = ((cv.linked_item_ids as string[]) || []).map((id) =>
+										String(id),
+									);
+									if (
+										(cv.text === null || cv.text === undefined || cv.text === '') &&
+										linkedIds.length > 0
+									) {
+										const names = linkedIds
+											.map((id) =>
+												linkedItemsById[id] ? String(linkedItemsById[id].name ?? '') : '',
+											)
+											.filter((s) => s && s !== '');
+										const display = (cv.display_value as string | undefined) || undefined;
+										if (display && display.trim() !== '') cv.text = display;
+										else if (names.length > 0) cv.text = names.join(', ');
+									}
+									const cur = mappables[cv.id as string] as IDataObject | undefined;
+									if (cur && typeof cur === 'object') {
+										const display = (cv.display_value as string | undefined) || undefined;
+										if (display && display.trim() !== '') (cur as IDataObject).text = display;
+									}
+									const relation = (infoObj.relation_column as IDataObject) || {};
+									const isConnectBoards = Object.keys(relation).length > 0;
+									if (!isConnectBoards) continue;
+									const dlc = infoObj.displayed_linked_columns as IDataObject | undefined;
+									if (!dlc) continue;
+									const boardIds = Object.keys(dlc);
+									if (boardIds.length === 0) continue;
+									const targetCols = (dlc[boardIds[0]] as string[]) || [];
+									if (targetCols.length === 0) continue;
+									const targetCol = targetCols[0];
+									const relationIds = Object.keys(relation).filter(
+										(k) => (relation as IDataObject)[k] === true,
+									);
+									let idsToUse = Object.keys(linkedItemsById);
+									if (relationIds.length > 0) {
+										const specific: string[] = [];
+										for (const rid of relationIds) {
+											const relCv = cvs.find((c) => c.id === rid);
+											const relIdsA = (relCv?.linked_item_ids as string[] | undefined) || [];
+											for (const id of relIdsA) specific.push(String(id));
+											const vRel = relCv?.value as string | null | undefined;
+											if (typeof vRel === 'string') {
+												try {
+													const obj = JSON.parse(vRel) as IDataObject;
+													const lp = (obj.linkedPulseIds as IDataObject[]) || [];
+													for (const p of lp) {
+														const id = String((p as IDataObject).linkedPulseId);
+														if (id) specific.push(id);
+													}
+												} catch {}
+											}
+										}
+										if (specific.length > 0) idsToUse = Array.from(new Set(specific));
+									}
+									const values: string[] = [];
+									let sum: number | null = null;
+									for (const id of idsToUse) {
+										const li = linkedItemsById[id];
+										if (!li) continue;
+										const b = (li.board as IDataObject) || {};
+										if (String(b.id) !== boardIds[0]) continue;
+										const lcv = (li.column_values as IDataObject[]) || [];
+										const target = lcv.find((c) => c.id === targetCol);
+										if (!target) continue;
+										let t = (target.text as string | null | undefined) ?? null;
+										if (!t) {
+											const vRaw = target.value as string | null | undefined;
+											if (typeof vRaw === 'string') {
+												try {
+													const parsed = JSON.parse(vRaw) as IDataObject | string;
+													if (typeof parsed === 'string') t = parsed as string;
+													else if (parsed && typeof parsed === 'object') {
+														const po = parsed as IDataObject;
+														if (typeof po.email === 'string') t = po.email as string;
+														else if (typeof po.text === 'string') t = po.text as string;
+													}
+												} catch {
+													t = vRaw as string;
+												}
+											}
+										}
+										if (t && t !== '') values.push(t);
+										const numeric = t !== null && t !== '' && !isNaN(Number(t)) ? Number(t) : null;
+										if (numeric !== null) sum = (sum ?? 0) + numeric;
+									}
+									const aggregatedText = values.length > 0 ? values.join(', ') : (cv.text ?? null);
+									cv.text = aggregatedText;
+									cv.value = sum !== null ? JSON.stringify(String(sum)) : cv.value;
+									const curAgg = mappables[cv.id as string] as IDataObject | undefined;
+									if (curAgg && typeof curAgg === 'object') {
+										(curAgg as IDataObject).text = aggregatedText as string | null;
+									}
+								}
+								return it;
+							});
+						}
 					}
 					if (operation === 'move') {
 						const groupId = this.getNodeParameter('groupId', i) as string;
