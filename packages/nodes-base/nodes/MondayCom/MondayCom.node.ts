@@ -27,22 +27,27 @@ interface IGraphqlBody {
 
 export const normalizeMondayItem = (item: IDataObject): IDataObject => {
 	const mapColumnValues = (cvs: IDataObject[] | undefined) =>
-		(cvs || []).map((cv) => {
-			const column = (cv.column as IDataObject) || {};
-			return {
+		(cvs ?? []).map((cv) => {
+			const column = (cv.column as IDataObject) ?? {};
+			const obj: IDataObject = {
 				id: cv.id,
 				value: cv.value,
 				text: cv.text,
-				display_value: cv.display_value,
 				title: column.title,
 				additional_info: column.settings_str,
-				linked_item_ids: (cv.linked_item_ids as string[]) || undefined,
-			} as IDataObject;
+			};
+			if (cv.display_value !== undefined && cv.display_value !== null) {
+				obj.display_value = cv.display_value as string;
+			}
+			if (cv.linked_item_ids !== undefined && cv.linked_item_ids !== null) {
+				obj.linked_item_ids = cv.linked_item_ids as string[];
+			}
+			return obj as IDataObject;
 		});
 
 	const buildMappables = (cvs: IDataObject[] | undefined) => {
 		const out: IDataObject = {};
-		for (const cv of cvs || []) {
+		for (const cv of cvs ?? []) {
 			const v = cv.value as string | null | undefined;
 			const t = cv.text as string | null | undefined;
 			const dv = (cv.display_value as string | null | undefined) ?? undefined;
@@ -56,7 +61,7 @@ export const normalizeMondayItem = (item: IDataObject): IDataObject => {
 					if (dv !== undefined && dv !== null) objOut.display_value = dv as string;
 					if (linkedIds && Array.isArray(linkedIds)) objOut.linked_item_ids = linkedIds as string[];
 					mapped = obj as IDataObject;
-				} catch (_e) {
+				} catch {
 					mapped = t ?? dv ?? v;
 				}
 			}
@@ -99,7 +104,7 @@ export const normalizeMondayItem = (item: IDataObject): IDataObject => {
 			}
 		: undefined;
 
-	const subitemsRaw = (item.subitems as IDataObject[]) || [];
+	const subitemsRaw = (item.subitems as IDataObject[]) ?? [];
 	const subitems = subitemsRaw.map((si) => normalizeSubitem(si));
 
 	const itemCvs = mapColumnValues(item.column_values as IDataObject[]);
@@ -111,7 +116,7 @@ export const normalizeMondayItem = (item: IDataObject): IDataObject => {
 		let infoObj: IDataObject | undefined;
 		try {
 			infoObj = JSON.parse(infoStr) as IDataObject;
-		} catch (_e) {
+		} catch {
 			infoObj = undefined;
 		}
 		if (!infoObj) continue;
@@ -159,7 +164,7 @@ export const normalizeMondayItem = (item: IDataObject): IDataObject => {
 		group: item.group,
 		column_values: itemCvs,
 		mappable_column_values: itemMappables,
-		assets: (item.assets as IDataObject[]) || [],
+		assets: (item.assets as IDataObject[]) ?? [],
 		parent_item: normalizedParent,
 		subitems,
 	} as IDataObject;
@@ -275,15 +280,20 @@ export class MondayCom implements INodeType {
 						page: 1,
 					},
 				};
-				const boards = await mondayComApiRequestAllItems.call(this, 'data.boards', body);
+				const boards = (await mondayComApiRequestAllItems.call(
+					this,
+					'data.boards',
+					body,
+				)) as IDataObject[];
 				if (boards === undefined) {
 					return returnData;
 				}
 
 				for (const board of boards) {
-					const boardName = board.name;
-					const boardId = board.id;
-					const boardDescription = board.description;
+					const b = (board ?? {}) as { id?: string | number; name?: string; description?: string };
+					const boardName = b.name ?? '';
+					const boardId = String(b.id ?? '');
+					const boardDescription = b.description ?? undefined;
 					returnData.push({
 						name: boardName,
 						value: boardId,
@@ -841,7 +851,7 @@ export class MondayCom implements INodeType {
 								let infoObj: IDataObject | undefined;
 								try {
 									infoObj = JSON.parse(infoStr) as IDataObject;
-								} catch (_e) {
+								} catch {
 									infoObj = undefined;
 								}
 								if (!infoObj) continue;
@@ -851,9 +861,11 @@ export class MondayCom implements INodeType {
 									linkedIds.length > 0
 								) {
 									const names = linkedIds
-										.map((id) =>
-											linkedItemsById[id] ? String(linkedItemsById[id].name ?? '') : '',
-										)
+										.map((id) => {
+											const li = linkedItemsById[id] as IDataObject | undefined;
+											const raw = li?.name as unknown;
+											return typeof raw === 'string' ? raw : '';
+										})
 										.filter((s) => s && s !== '');
 									const display = (cv.display_value as string | undefined) || undefined;
 									if (display && display.trim() !== '') cv.text = display;
@@ -891,8 +903,15 @@ export class MondayCom implements INodeType {
 								let sum: number | null = null;
 								for (const id of idsToUse) {
 									const li = linkedItemsById[id];
-									const b = (li.board as IDataObject) || {};
-									if (String(b.id) !== boardIds[0]) continue;
+									const b = (li.board as IDataObject) ?? {};
+									const bidRaw = (b as IDataObject).id as unknown;
+									const bid =
+										typeof bidRaw === 'string'
+											? bidRaw
+											: typeof bidRaw === 'number'
+												? String(bidRaw)
+												: '';
+									if (bid !== boardIds[0]) continue;
 									const lcv = (li.column_values as IDataObject[]) || [];
 									const target = lcv.find((c) => c.id === targetCol);
 									if (!target) continue;
@@ -909,7 +928,7 @@ export class MondayCom implements INodeType {
 													if (typeof po.email === 'string') t = po.email as string;
 													else if (typeof po.text === 'string') t = po.text as string;
 												}
-											} catch (_e) {
+											} catch {
 												t = vRaw as string;
 											}
 										}
@@ -1023,7 +1042,13 @@ export class MondayCom implements INodeType {
 											const obj = JSON.parse(v) as IDataObject;
 											const lp = (obj.linkedPulseIds as IDataObject[]) || [];
 											for (const p of lp) {
-												const id = String((p as IDataObject).linkedPulseId);
+												const lpIdRaw = (p as IDataObject).linkedPulseId as unknown;
+												const id =
+													typeof lpIdRaw === 'string'
+														? lpIdRaw
+														: typeof lpIdRaw === 'number'
+															? String(lpIdRaw)
+															: '';
 												if (id) allLinkedIds.add(id);
 											}
 										} catch {}
@@ -1033,7 +1058,8 @@ export class MondayCom implements INodeType {
 							let linkedItemsById: Record<string, IDataObject> = {};
 							if (allLinkedIds.size > 0) {
 								const q: IGraphqlBody = {
-									query: `query ($ids: [ID!]){ items(ids: $ids){ id name board { id } column_values { id text value } } }`,
+									query:
+										'query ($ids: [ID!]){ items(ids: $ids){ id name board { id } column_values { id text value } } }',
 									variables: { ids: Array.from(allLinkedIds) },
 								};
 								const linkedResp = await mondayComApiRequest.call(this, q);
@@ -1102,7 +1128,13 @@ export class MondayCom implements INodeType {
 													const obj = JSON.parse(vRel) as IDataObject;
 													const lp = (obj.linkedPulseIds as IDataObject[]) || [];
 													for (const p of lp) {
-														const id = String((p as IDataObject).linkedPulseId);
+														const lpIdRaw = (p as IDataObject).linkedPulseId as unknown;
+														const id =
+															typeof lpIdRaw === 'string'
+																? lpIdRaw
+																: typeof lpIdRaw === 'number'
+																	? String(lpIdRaw)
+																	: '';
 														if (id) specific.push(id);
 													}
 												} catch {}
@@ -1115,8 +1147,15 @@ export class MondayCom implements INodeType {
 									for (const id of idsToUse) {
 										const li = linkedItemsById[id];
 										if (!li) continue;
-										const b = (li.board as IDataObject) || {};
-										if (String(b.id) !== boardIds[0]) continue;
+										const b = (li.board as IDataObject) ?? {};
+										const bidRaw = (b as IDataObject).id as unknown;
+										const bid =
+											typeof bidRaw === 'string'
+												? bidRaw
+												: typeof bidRaw === 'number'
+													? String(bidRaw)
+													: '';
+										if (bid !== boardIds[0]) continue;
 										const lcv = (li.column_values as IDataObject[]) || [];
 										const target = lcv.find((c) => c.id === targetCol);
 										if (!target) continue;
@@ -1249,7 +1288,13 @@ export class MondayCom implements INodeType {
 											const obj = JSON.parse(v) as IDataObject;
 											const lp = (obj.linkedPulseIds as IDataObject[]) || [];
 											for (const p of lp) {
-												const id = String((p as IDataObject).linkedPulseId);
+												const lpIdRaw = (p as IDataObject).linkedPulseId as unknown;
+												const id =
+													typeof lpIdRaw === 'string'
+														? lpIdRaw
+														: typeof lpIdRaw === 'number'
+															? String(lpIdRaw)
+															: '';
 												if (id) allLinkedIds.add(id);
 											}
 										} catch {}
@@ -1259,7 +1304,8 @@ export class MondayCom implements INodeType {
 							let linkedItemsById: Record<string, IDataObject> = {};
 							if (allLinkedIds.size > 0) {
 								const q: IGraphqlBody = {
-									query: `query ($ids: [ID!]){ items(ids: $ids){ id name board { id } column_values { id text value } } }`,
+									query:
+										'query ($ids: [ID!]){ items(ids: $ids){ id name board { id } column_values { id text value } } }',
 									variables: { ids: Array.from(allLinkedIds) },
 								};
 								const linkedResp = await mondayComApiRequest.call(this, q);
@@ -1341,8 +1387,15 @@ export class MondayCom implements INodeType {
 									for (const id of idsToUse) {
 										const li = linkedItemsById[id];
 										if (!li) continue;
-										const b = (li.board as IDataObject) || {};
-										if (String(b.id) !== boardIds[0]) continue;
+										const b = (li.board as IDataObject) ?? {};
+										const bidRaw = (b as IDataObject).id as unknown;
+										const bid =
+											typeof bidRaw === 'string'
+												? bidRaw
+												: typeof bidRaw === 'number'
+													? String(bidRaw)
+													: '';
+										if (bid !== boardIds[0]) continue;
 										const lcv = (li.column_values as IDataObject[]) || [];
 										const target = lcv.find((c) => c.id === targetCol);
 										if (!target) continue;
@@ -1395,8 +1448,11 @@ export class MondayCom implements INodeType {
 							},
 						};
 
-						responseData = await mondayComApiRequest.call(this, body);
-						responseData = responseData.data.move_item_to_group;
+						{
+							const respObj = (await mondayComApiRequest.call(this, body)) as IDataObject;
+							const dataObj = (respObj.data as IDataObject | undefined) ?? undefined;
+							responseData = dataObj?.move_item_to_group;
+						}
 					}
 				}
 				const executionData = this.helpers.constructExecutionMetaData(
@@ -1404,14 +1460,14 @@ export class MondayCom implements INodeType {
 					{ itemData: { item: i } },
 				);
 
-				returnData.push(...executionData);
+				(returnData.push as any).apply(returnData, executionData as any);
 			} catch (error) {
 				if (this.continueOnFail()) {
 					const executionErrorData = this.helpers.constructExecutionMetaData(
-						this.helpers.returnJsonArray({ error: error.message }),
+						this.helpers.returnJsonArray({ error: (error as Error)?.message ?? String(error) }),
 						{ itemData: { item: i } },
 					);
-					returnData.push(...executionErrorData);
+					(returnData.push as any).apply(returnData, executionErrorData as any);
 					continue;
 				}
 				throw error;

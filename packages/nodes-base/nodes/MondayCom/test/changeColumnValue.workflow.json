@@ -1,0 +1,51 @@
+{
+	"name": "MondayCom change column value",
+	"nodes": [
+		{
+			"parameters": {},
+			"id": "t1",
+			"name": "When clicking \"Execute Workflow\"",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [0, 0]
+		},
+		{
+			"parameters": {
+				"authentication": "oAuth2",
+				"resource": "boardItem",
+				"operation": "changeColumnValue",
+				"boardId": "999",
+				"itemId": "123",
+				"columnId": "text",
+				"value": "{\"text\":\"new\"}"
+			},
+			"id": "m1",
+			"name": "Monday change column",
+			"type": "n8n-nodes-base.mondayCom",
+			"typeVersion": 1,
+			"position": [220, 0],
+			"credentials": { "mondayComOAuth2Api": { "id": "cred", "name": "Test Credentials" } }
+		},
+		{
+			"parameters": {},
+			"id": "n1",
+			"name": "Result",
+			"type": "n8n-nodes-base.noOp",
+			"typeVersion": 1,
+			"position": [440, 0]
+		}
+	],
+	"pinData": { "Result": [{ "json": { "id": "123" } }] },
+	"connections": {
+		"When clicking \"Execute Workflow\"": {
+			"main": [[{ "node": "Monday change column", "type": "main", "index": 0 }]]
+		},
+		"Monday change column": { "main": [[{ "node": "Result", "type": "main", "index": 0 }]] }
+	},
+	"active": false,
+	"settings": {},
+	"versionId": "v1",
+	"id": "wf-change-col",
+	"meta": { "instanceId": "instance" },
+	"tags": []
+}
