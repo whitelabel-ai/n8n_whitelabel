@@ -14,6 +14,7 @@ import { boardColumnFields, boardColumnOperations } from './BoardColumnDescripti
 import { boardFields, boardOperations } from './BoardDescription';
 import { boardGroupFields, boardGroupOperations } from './BoardGroupDescription';
 import { boardItemFields, boardItemOperations } from './BoardItemDescription';
+import { otherFields, otherOperations } from './OtherDescription';
 import {
 	mondayComApiPaginatedRequest,
 	mondayComApiRequest,
@@ -244,6 +245,10 @@ export class MondayCom implements INodeType {
 						name: 'Board Item',
 						value: 'boardItem',
 					},
+					{
+						name: 'Other',
+						value: 'other',
+					},
 				],
 				default: 'board',
 			},
@@ -259,6 +264,9 @@ export class MondayCom implements INodeType {
 			// BOARD ITEM
 			...boardItemOperations,
 			...boardItemFields,
+			// OTHER
+			...otherOperations,
+			...otherFields,
 		],
 	};
 
@@ -429,18 +437,24 @@ export class MondayCom implements INodeType {
 
 						const body: IGraphqlBody = {
 							query: `query ($id: [ID!]) {
-									boards (ids: $id){
+								boards (ids: $id){
+									id
+									name
+									description
+									state
+									board_folder_id
+									board_kind
+									owners { id }
+									workspace { id name }
+									columns {
 										id
-										name
-										description
-										state
-										board_folder_id
-										board_kind
-										owners {
-											id
-										}
+										title
+										type
+										settings_str
+										archived
 									}
-								}`,
+								}
+							}`,
 							variables: {
 								id: boardId,
 							},
@@ -1453,6 +1467,20 @@ export class MondayCom implements INodeType {
 							const dataObj = (respObj.data as IDataObject | undefined) ?? undefined;
 							responseData = dataObj?.move_item_to_group;
 						}
+					}
+				}
+				if (resource === 'other') {
+					if (operation === 'executeGraphqlQuery') {
+						const queryStr = this.getNodeParameter('query', i) as string;
+						const raw = this.getNodeParameter('raw', i) as boolean;
+
+						const body: IGraphqlBody = {
+							query: queryStr,
+							variables: {},
+						};
+
+						const respObj = (await mondayComApiRequest.call(this, body)) as IDataObject;
+						responseData = raw ? respObj : (respObj.data as IDataObject);
 					}
 				}
 				const executionData = this.helpers.constructExecutionMetaData(
