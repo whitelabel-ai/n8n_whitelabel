@@ -138,6 +138,7 @@ COPY --from=javascript-runner-builder --chown=root:root /app/task-runner-javascr
 COPY --from=python-runner-builder --chown=root:root /app/task-runner-python /opt/runners/task-runner-python
 COPY --from=launcher-downloader /launcher-bin/* /usr/local/bin/
 COPY --chown=root:root docker/images/runners/n8n-task-runners.json /etc/task-runners.json
+COPY --chown=root:root docker/images/runners/n8n-task-runners.json /etc/n8n-task-runners.json
 
 # Preinstall popular Python libraries into runner venv
 RUN uv pip install -p /opt/runners/task-runner-python/.venv/bin/python \
