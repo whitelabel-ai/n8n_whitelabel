@@ -9,6 +9,8 @@ env:
   REGISTRY: registry.whitelabel.lat
   IMAGE_NAME: whitelabel-ai/n8n
   REGISTRY_IMAGE: registry.whitelabel.lat/whitelabel-ai/n8n
+  RUNNERS_IMAGE_NAME: whitelabel-ai/runners
+  REGISTRY_RUNNERS_IMAGE: registry.whitelabel.lat/whitelabel-ai/runners
 
 jobs:
   build-and-push:
@@ -57,3 +59,14 @@ jobs:
           tags: |
             ${{ env.REGISTRY_IMAGE }}:${{ github.sha }}
             ${{ env.REGISTRY_IMAGE }}:latest
+
+      - name: Build and push task runners image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/images/runners/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY_RUNNERS_IMAGE }}:${{ github.sha }}
+            ${{ env.REGISTRY_RUNNERS_IMAGE }}:latest

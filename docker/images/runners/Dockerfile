@@ -30,6 +30,8 @@ RUN node -e "const pkg = require('./package.json'); \
 RUN rm -f node_modules/.modules.yaml && \
     pnpm add moment@2.30.1 --prod --no-lockfile
 
+RUN pnpm add axios@1.7.7 lodash@4.17.21 uuid@9.0.1 cheerio@1.0.0-rc.12 jsonwebtoken@9.0.2 --prod --no-lockfile
+
 # ==============================================================================
 # STAGE 2: Python runner build (@n8n/task-runner-python) with uv
 # Produces a relocatable venv tied to the python version used
@@ -135,7 +137,15 @@ WORKDIR /home/runner
 COPY --from=javascript-runner-builder --chown=root:root /app/task-runner-javascript /opt/runners/task-runner-javascript
 COPY --from=python-runner-builder --chown=root:root /app/task-runner-python /opt/runners/task-runner-python
 COPY --from=launcher-downloader /launcher-bin/* /usr/local/bin/
-COPY --chown=root:root docker/images/runners/n8n-task-runners.json /etc/n8n-task-runners.json
+COPY --chown=root:root docker/images/runners/n8n-task-runners.json /etc/task-runners.json
+
+# Preinstall popular Python libraries into runner venv
+RUN uv pip install -p /opt/runners/task-runner-python/.venv/bin/python \
+    requests==2.32.3 \
+    httpx==0.27.2 \
+    pytz==2024.1 \
+    python-dateutil==2.9.0.post0 \
+    Unidecode==1.3.7
 
 USER runner
 
