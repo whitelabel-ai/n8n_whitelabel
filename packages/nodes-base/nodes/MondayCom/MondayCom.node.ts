@@ -769,12 +769,15 @@ export class MondayCom implements INodeType {
                                             id
                                             text
                                             value
-                                            column {
+                                        column {
                                                 title
                                                 settings_str
                                             }
                                             ... on BoardRelationValue {
                                                 linked_item_ids
+                                                display_value
+                                            }
+                                            ... on MirrorValue {
                                                 display_value
                                             }
                                         }
@@ -797,6 +800,9 @@ export class MondayCom implements INodeType {
                                                     linked_item_ids
                                                     display_value
                                                 }
+                                                ... on MirrorValue {
+                                                    display_value
+                                                }
                                             }
                                         }
                                         subitems {
@@ -815,6 +821,9 @@ export class MondayCom implements INodeType {
                                                 column { title settings_str }
                                                 ... on BoardRelationValue {
                                                     linked_item_ids
+                                                    display_value
+                                                }
+                                                ... on MirrorValue {
                                                     display_value
                                                 }
                                             }
@@ -983,6 +992,9 @@ export class MondayCom implements INodeType {
                                     linked_item_ids
                                     display_value
                                 }
+                                ... on MirrorValue {
+                                    display_value
+                                }
                             }
                             assets { id name url }
                             subitems {
@@ -1001,6 +1013,9 @@ export class MondayCom implements INodeType {
                                     column { title settings_str }
                                     ... on BoardRelationValue {
                                         linked_item_ids
+                                        display_value
+                                    }
+                                    ... on MirrorValue {
                                         display_value
                                     }
                                 }
@@ -1231,6 +1246,9 @@ export class MondayCom implements INodeType {
                                     linked_item_ids
                                     display_value
                                 }
+                                ... on MirrorValue {
+                                    display_value
+                                }
                             }
                             assets { id name url }
                             subitems {
@@ -1249,6 +1267,9 @@ export class MondayCom implements INodeType {
                                     column { title settings_str }
                                     ... on BoardRelationValue {
                                         linked_item_ids
+                                        display_value
+                                    }
+                                    ... on MirrorValue {
                                         display_value
                                     }
                                 }
