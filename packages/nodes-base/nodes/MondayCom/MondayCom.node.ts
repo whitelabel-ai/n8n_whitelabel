@@ -69,6 +69,9 @@ export const normalizeMondayItem = (item: IDataObject): IDataObject => {
 			if (!v && linkedIds) {
 				mapped = { linked_item_ids: linkedIds, text: t ?? dv ?? null } as IDataObject;
 			}
+			if (!v && !linkedIds && dv && (t === null || t === undefined || t === '')) {
+				mapped = { text: dv, display_value: dv } as IDataObject;
+			}
 			out[cv.id as string] = mapped as unknown as IDataObject;
 		}
 		return out;
@@ -879,20 +882,19 @@ export class MondayCom implements INodeType {
 								}
 								if (!infoObj) continue;
 								const linkedIds = ((cv.linked_item_ids as string[]) || []).map((id) => String(id));
-								if (
-									(cv.text === null || cv.text === undefined || cv.text === '') &&
-									linkedIds.length > 0
-								) {
-									const names = linkedIds
-										.map((id) => {
-											const li = linkedItemsById[id] as IDataObject | undefined;
-											const raw = li?.name as unknown;
-											return typeof raw === 'string' ? raw : '';
-										})
-										.filter((s) => s && s !== '');
+								if (cv.text === null || cv.text === undefined || cv.text === '') {
 									const display = (cv.display_value as string | undefined) || undefined;
 									if (display && display.trim() !== '') cv.text = display;
-									else if (names.length > 0) cv.text = names.join(', ');
+									else if (linkedIds.length > 0) {
+										const names = linkedIds
+											.map((id) => {
+												const li = linkedItemsById[id] as IDataObject | undefined;
+												const raw = li?.name as unknown;
+												return typeof raw === 'string' ? raw : '';
+											})
+											.filter((s) => s && s !== '');
+										if (names.length > 0) cv.text = names.join(', ');
+									}
 								}
 								const cur = mappables[cv.id as string] as IDataObject | undefined;
 								if (cur && typeof cur === 'object') {
@@ -1113,18 +1115,17 @@ export class MondayCom implements INodeType {
 									const linkedIds = ((cv.linked_item_ids as string[]) || []).map((id) =>
 										String(id),
 									);
-									if (
-										(cv.text === null || cv.text === undefined || cv.text === '') &&
-										linkedIds.length > 0
-									) {
-										const names = linkedIds
-											.map((id) =>
-												linkedItemsById[id] ? String(linkedItemsById[id].name ?? '') : '',
-											)
-											.filter((s) => s && s !== '');
+									if (cv.text === null || cv.text === undefined || cv.text === '') {
 										const display = (cv.display_value as string | undefined) || undefined;
 										if (display && display.trim() !== '') cv.text = display;
-										else if (names.length > 0) cv.text = names.join(', ');
+										else if (linkedIds.length > 0) {
+											const names = linkedIds
+												.map((id) =>
+													linkedItemsById[id] ? String(linkedItemsById[id].name ?? '') : '',
+												)
+												.filter((s) => s && s !== '');
+											if (names.length > 0) cv.text = names.join(', ');
+										}
 									}
 									const cur = mappables[cv.id as string] as IDataObject | undefined;
 									if (cur && typeof cur === 'object') {
