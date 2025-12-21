@@ -9,8 +9,8 @@ env:
   REGISTRY: registry.whitelabel.lat
   IMAGE_NAME: whitelabel-ai/n8n-v2
   REGISTRY_IMAGE: registry.whitelabel.lat/whitelabel-ai/n8n-v2
-  RUNNERS_IMAGE_NAME: whitelabel-ai/runners
-  REGISTRY_RUNNERS_IMAGE: registry.whitelabel.lat/whitelabel-ai/runners
+  RUNNERS_IMAGE_NAME: whitelabel-ai/runners-v2
+  REGISTRY_RUNNERS_IMAGE: registry.whitelabel.lat/whitelabel-ai/runners-v2
 
 jobs:
   build-and-push:
