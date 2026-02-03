@@ -1,6 +1,6 @@
 import type { SourceControlledFile } from '@n8n/api-types';
 import { Logger } from '@n8n/backend-common';
-import { FolderRepository, type TagEntity, TagRepository, type User } from '@n8n/db';
+import { FolderRepository, TagRepository, type User, WorkflowRepository } from '@n8n/db';
 import { Service } from '@n8n/di';
 import { hasGlobalScope } from '@n8n/permissions';
 import { UserError } from 'n8n-workflow';
@@ -25,8 +25,12 @@ import type { ExportableFolder } from './types/exportable-folders';
 import type { ExportableProjectWithFileName } from './types/exportable-project';
 import { ExportableVariable } from './types/exportable-variable';
 import { SourceControlContext } from './types/source-control-context';
-import type { SourceControlGetStatus } from './types/source-control-get-status';
+import type {
+	SourceControlGetStatus,
+	SourceControlGetStatusVerboseResult,
+} from './types/source-control-get-status';
 import type { SourceControlWorkflowVersionId } from './types/source-control-workflow-version-id';
+import { ExportableTagEntity } from '@/modules/source-control.ee/types/exportable-tags';
 
 @Service()
 export class SourceControlStatusService {
@@ -37,6 +41,7 @@ export class SourceControlStatusService {
 		private readonly sourceControlPreferencesService: SourceControlPreferencesService,
 		private readonly tagRepository: TagRepository,
 		private readonly folderRepository: FolderRepository,
+		private readonly workflowRepository: WorkflowRepository,
 		private readonly eventService: EventService,
 	) {}
 
@@ -54,7 +59,22 @@ export class SourceControlStatusService {
 	 * @returns either SourceControlledFile[] if verbose is false,
 	 * or multiple SourceControlledFile[] with all determined differences for debugging purposes
 	 */
-	async getStatus(user: User, options: SourceControlGetStatus) {
+	async getStatus(
+		user: User,
+		options: SourceControlGetStatus & { verbose: true },
+	): Promise<SourceControlGetStatusVerboseResult>;
+	async getStatus(
+		user: User,
+		options: SourceControlGetStatus & { verbose?: false },
+	): Promise<SourceControlledFile[]>;
+	async getStatus(
+		user: User,
+		options: SourceControlGetStatus & { verbose: boolean },
+	): Promise<SourceControlledFile[] | SourceControlGetStatusVerboseResult>;
+	async getStatus(
+		user: User,
+		options: SourceControlGetStatus,
+	): Promise<SourceControlledFile[] | SourceControlGetStatusVerboseResult> {
 		const context = new SourceControlContext(user);
 
 		if (options.direction === 'pull' && !hasGlobalScope(user, 'sourceControl:pull')) {
@@ -175,6 +195,22 @@ export class SourceControlStatusService {
 		const wfLocalVersionIds =
 			await this.sourceControlImportService.getLocalVersionIdsFromDb(context);
 
+		// Fetch published status for local workflows to determine isLocalPublished
+		const candidateIds = [
+			...new Set([...wfLocalVersionIds.map((w) => w.id), ...wfRemoteVersionIds.map((w) => w.id)]),
+		];
+		const localWorkflowsWithStatus = await this.workflowRepository.findByIds(candidateIds, {
+			fields: ['id', 'activeVersionId'],
+		});
+		const publishedWorkflowIds = new Set(
+			localWorkflowsWithStatus.filter((w) => !!w.activeVersionId).map((w) => w.id),
+		);
+
+		// Create map of isArchived from remote workflows to determine isRemoteArchived
+		const archivedWorkflowIds = new Map(
+			wfRemoteVersionIds.filter((w) => w.isRemoteArchived).map((w) => [w.id, true]),
+		);
+
 		let outOfScopeWF: SourceControlWorkflowVersionId[] = [];
 
 		if (!context.hasAccessToAllProjects()) {
@@ -247,6 +283,8 @@ export class SourceControlStatusService {
 				conflict: false,
 				file: item.filename,
 				updatedAt: item.updatedAt ?? new Date().toISOString(),
+				isLocalPublished: false, // New workflow, not published locally
+				isRemoteArchived: archivedWorkflowIds.get(item.id) ?? false,
 				owner: item.owner,
 			});
 		});
@@ -261,6 +299,8 @@ export class SourceControlStatusService {
 				conflict: options.direction === 'push' ? false : true,
 				file: item.filename,
 				updatedAt: item.updatedAt ?? new Date().toISOString(),
+				isLocalPublished: publishedWorkflowIds.has(item.id),
+				isRemoteArchived: false, // Workflow deleted from remote, no archived status
 				owner: item.owner,
 			});
 		});
@@ -275,6 +315,8 @@ export class SourceControlStatusService {
 				conflict: true,
 				file: item.filename,
 				updatedAt: item.updatedAt ?? new Date().toISOString(),
+				isLocalPublished: publishedWorkflowIds.has(item.id),
+				isRemoteArchived: archivedWorkflowIds.get(item.id) ?? false,
 				owner: item.owner,
 			});
 		});
@@ -476,7 +518,7 @@ export class SourceControlStatusService {
 			(local) => tagMappingsRemote.tags.findIndex((remote) => remote.id === local.id) === -1,
 		);
 
-		const tagsModifiedInEither: TagEntity[] = [];
+		const tagsModifiedInEither: ExportableTagEntity[] = [];
 		tagMappingsLocal.tags.forEach((local) => {
 			const mismatchingIds = tagMappingsRemote.tags.find(
 				(remote) => remote.id === local.id && remote.name !== local.name,
@@ -497,7 +539,7 @@ export class SourceControlStatusService {
 		const mappingsMissingInRemote = tagMappingsLocal.mappings.filter(
 			(local) =>
 				tagMappingsRemote.mappings.findIndex(
-					(remote) => remote.tagId === local.tagId && remote.workflowId === remote.workflowId,
+					(remote) => remote.tagId === local.tagId && remote.workflowId === local.workflowId,
 				) === -1,
 		);
 
@@ -538,6 +580,30 @@ export class SourceControlStatusService {
 				updatedAt: lastUpdatedDate.toISOString(),
 			});
 		});
+
+		// If only mappings changed (not tags themselves), we still need to mark the tags file as modified
+		const hasMappingChanges =
+			mappingsMissingInLocal.length > 0 || mappingsMissingInRemote.length > 0;
+		const hasTagChanges =
+			tagsMissingInLocal.length > 0 ||
+			tagsMissingInRemote.length > 0 ||
+			tagsModifiedInEither.length > 0;
+
+		if (hasMappingChanges && !hasTagChanges) {
+			// Pulling deletes local mappings that don't exist remotely, so mark as conflict
+			const isConflict = options.direction === 'pull' && mappingsMissingInRemote.length > 0;
+
+			sourceControlledFiles.push({
+				id: 'tags',
+				name: 'Workflow Tags',
+				type: 'tags',
+				status: 'modified',
+				location: options.direction === 'push' ? 'local' : 'remote',
+				conflict: isConflict,
+				file: getTagsPath(this.gitFolder),
+				updatedAt: lastUpdatedDate.toISOString(),
+			});
+		}
 
 		return {
 			tagsMissingInLocal,

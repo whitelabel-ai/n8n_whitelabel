@@ -103,10 +103,11 @@ export type AggregatedMessage = Pick<
 >;
 
 type Handlers = {
-	onBegin?: (message: AggregatedMessage) => void;
-	onItem?: (message: AggregatedMessage, delta: string) => void;
-	onEnd?: (message: AggregatedMessage) => void;
-	onError?: (message: AggregatedMessage, errText?: string) => void;
+	onBegin?: (message: AggregatedMessage) => Promise<void>;
+	onItem?: (message: AggregatedMessage, delta: string) => Promise<void>;
+	onEnd?: (message: AggregatedMessage) => Promise<void>;
+	onError?: (message: AggregatedMessage, errText?: string) => Promise<void>;
+	onCancel?: (message: AggregatedMessage) => Promise<void>;
 };
 
 export function createStructuredChunkAggregator(
@@ -114,14 +115,14 @@ export function createStructuredChunkAggregator(
 	retryOfMessageId: ChatMessageId | null,
 	handlers: Handlers = {},
 ) {
-	const { onBegin, onItem, onEnd, onError } = handlers;
+	const { onBegin, onItem, onEnd, onError, onCancel } = handlers;
 
-	const active = new Map<MessageKey, AggregatedMessage>();
 	const activeByKey = new Map<MessageKey, AggregatedMessage>();
+	let cancelled = false;
 
 	let previousMessageId: ChatMessageId | null = initialPreviousMessageId;
 
-	const startNew = (): AggregatedMessage => {
+	const startNew = async (): Promise<AggregatedMessage> => {
 		const message: AggregatedMessage = {
 			id: uuidv4(),
 			previousMessageId,
@@ -135,20 +136,25 @@ export function createStructuredChunkAggregator(
 			status: 'running',
 		};
 		previousMessageId = message.id;
-		onBegin?.(message);
+		await onBegin?.(message);
 		return message;
 	};
 
-	const ensureMessage = (key: MessageKey): AggregatedMessage => {
+	const ensureMessage = async (key: MessageKey): Promise<AggregatedMessage> => {
 		let message = activeByKey.get(key);
 		if (!message) {
-			message = startNew();
+			message = await startNew();
 			activeByKey.set(key, message);
 		}
 		return message;
 	};
 
-	const ingest = (chunk: StructuredChunk): AggregatedMessage => {
+	const ingest = async (chunk: StructuredChunk): Promise<AggregatedMessage | null> => {
+		// After cancelAll(), ignore any further chunks
+		if (cancelled) {
+			return null;
+		}
+
 		const { type, content, metadata } = chunk;
 		const key = keyOf(metadata);
 
@@ -156,30 +162,30 @@ export function createStructuredChunkAggregator(
 			if (activeByKey.has(key)) {
 				throw new Error(`Duplicate begin for key ${key}`);
 			}
-			const message = startNew();
+			const message = await startNew();
 			activeByKey.set(key, message);
 			return message;
 		}
 
 		if (type === 'item') {
-			const message = ensureMessage(key);
+			const message = await ensureMessage(key);
 			if (typeof content === 'string' && content.length) {
 				message.content += content;
-				onItem?.(message, content);
+				await onItem?.(message, content);
 			}
 			return message;
 		}
 
 		if (type === 'end') {
-			const message = ensureMessage(key);
+			const message = await ensureMessage(key);
 			message.status = 'success';
 			message.updatedAt = new Date();
 			activeByKey.delete(key);
-			onEnd?.(message);
+			await onEnd?.(message);
 			return message;
 		}
 
-		const message = ensureMessage(key);
+		const message = await ensureMessage(key);
 		message.status = 'error';
 		message.updatedAt = new Date();
 		if (typeof content === 'string') {
@@ -187,17 +193,21 @@ export function createStructuredChunkAggregator(
 		}
 
 		activeByKey.delete(key);
-		onError?.(message, content);
+		await onError?.(message, content);
 		return message;
 	};
 
-	const finalizeAll = () => {
-		for (const message of active.values()) {
+	const cancelAll = async () => {
+		cancelled = true;
+		const messages = Array.from(activeByKey.values());
+		activeByKey.clear();
+
+		for (const message of messages) {
 			message.status = 'cancelled';
 			message.updatedAt = new Date();
+			await onCancel?.(message);
 		}
-		active.clear();
 	};
 
-	return { ingest, finalizeAll };
+	return { ingest, cancelAll };
 }
