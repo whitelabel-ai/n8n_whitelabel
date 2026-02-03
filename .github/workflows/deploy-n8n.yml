@@ -49,6 +49,10 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
+      - name: Get version from package.json
+        id: package-version
+        uses: martinbeentjes/npm-get-version-action@v1.3.1
+
       - name: Compute build tag (YYYYMMDD-run_number)
         run: echo "BUILD_TAG=$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}" >> $GITHUB_ENV
 
@@ -61,6 +65,7 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY_IMAGE }}:latest
+            ${{ env.REGISTRY_IMAGE }}:${{ steps.package-version.outputs.current-version }}
             ${{ env.REGISTRY_IMAGE }}:${{ env.BUILD_TAG }}
 
       - name: Build and push task runners image
@@ -72,4 +77,5 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY_RUNNERS_IMAGE }}:latest
+            ${{ env.REGISTRY_RUNNERS_IMAGE }}:${{ steps.package-version.outputs.current-version }}
             ${{ env.REGISTRY_RUNNERS_IMAGE }}:${{ env.BUILD_TAG }}
