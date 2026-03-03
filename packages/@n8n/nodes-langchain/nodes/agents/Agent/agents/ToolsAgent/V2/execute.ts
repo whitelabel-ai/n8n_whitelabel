@@ -18,6 +18,8 @@ import assert from 'node:assert';
 
 import { loadMemory } from '@utils/agent-execution';
 import { getPromptInputByType } from '@utils/helpers';
+import { TrackingCallbackHandler } from '@utils/tracking';
+import { getTracingConfig } from '@utils/tracing';
 import {
 	getOptionalOutputParser,
 	type N8nOutputParser,
@@ -288,6 +290,13 @@ export async function toolsAgentExecute(
 			// Check if streaming is actually available
 			const isStreamingAvailable = 'isStreaming' in this ? this.isStreaming?.() : undefined;
 
+			const trackingWebhookUrl = process.env.N8N_AI_TRACKING_WEBHOOK_URL;
+			const additionalCallbacks = trackingWebhookUrl
+				? [new TrackingCallbackHandler(this, trackingWebhookUrl, itemIndex)]
+				: undefined;
+
+			const tracingConfig = getTracingConfig(this, { additionalCallbacks });
+
 			if (
 				'isStreaming' in this &&
 				enableStreaming &&
@@ -296,7 +305,7 @@ export async function toolsAgentExecute(
 			) {
 				// Get chat history respecting the context window length configured in memory
 				const chatHistory = memory ? await loadMemory(memory, model) : undefined;
-				const eventStream = executor.streamEvents(
+				const eventStream = executor.withConfig(tracingConfig).streamEvents(
 					{
 						...invokeParams,
 						chat_history: chatHistory ?? undefined,
@@ -315,7 +324,10 @@ export async function toolsAgentExecute(
 				);
 			} else {
 				// Handle regular execution
-				return await executor.invoke(invokeParams, executeOptions);
+				const result = await executor
+					.withConfig(tracingConfig)
+					.invoke(invokeParams, executeOptions);
+				return result;
 			}
 		});
 

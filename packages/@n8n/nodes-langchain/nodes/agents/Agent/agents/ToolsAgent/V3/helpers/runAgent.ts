@@ -9,6 +9,7 @@ import {
 	saveToMemory,
 	type RequestResponseMetadata,
 } from '@utils/agent-execution';
+import { TrackingCallbackHandler } from '@utils/tracking';
 import { getTracingConfig } from '@utils/tracing';
 import type {
 	EngineRequest,
@@ -57,6 +58,11 @@ export async function runAgent(
 	// Check if streaming is actually available
 	const isStreamingAvailable = 'isStreaming' in ctx ? ctx.isStreaming?.() : undefined;
 
+	const trackingWebhookUrl = process.env.N8N_AI_TRACKING_WEBHOOK_URL;
+	const additionalCallbacks = trackingWebhookUrl
+		? [new TrackingCallbackHandler(ctx, trackingWebhookUrl, itemIndex)]
+		: undefined;
+
 	if (
 		'isStreaming' in ctx &&
 		options.enableStreaming &&
@@ -64,16 +70,18 @@ export async function runAgent(
 		ctx.getNode().typeVersion >= 2.1
 	) {
 		const chatHistory = await loadMemory(memory, model, options.maxTokensFromMemory);
-		const eventStream = executor.withConfig(getTracingConfig(ctx)).streamEvents(
-			{
-				...invokeParams,
-				chat_history: chatHistory,
-			},
-			{
-				version: 'v2',
-				...executeOptions,
-			},
-		);
+		const eventStream = executor
+			.withConfig(getTracingConfig(ctx, { additionalCallbacks }))
+			.streamEvents(
+				{
+					...invokeParams,
+					chat_history: chatHistory,
+				},
+				{
+					version: 'v2',
+					...executeOptions,
+				},
+			);
 
 		const result = await processEventStream(ctx, eventStream, itemIndex);
 
@@ -101,10 +109,12 @@ export async function runAgent(
 		// Handle regular execution
 		const chatHistory = await loadMemory(memory, model, options.maxTokensFromMemory);
 
-		const modelResponse = await executor.withConfig(getTracingConfig(ctx)).invoke({
-			...invokeParams,
-			chat_history: chatHistory,
-		});
+		const modelResponse = await executor
+			.withConfig(getTracingConfig(ctx, { additionalCallbacks }))
+			.invoke({
+				...invokeParams,
+				chat_history: chatHistory,
+			});
 
 		if ('returnValues' in modelResponse) {
 			// Save conversation to memory including any tool call context
