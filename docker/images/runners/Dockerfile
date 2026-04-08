@@ -1,4 +1,4 @@
-ARG NODE_VERSION=22.21.1
+ARG NODE_VERSION=24.14.1
 ARG PYTHON_VERSION=3.13
 
 # ==============================================================================
@@ -30,7 +30,11 @@ RUN node -e "const pkg = require('./package.json'); \
 RUN rm -f node_modules/.modules.yaml && \
     pnpm add moment@2.30.1 --prod --no-lockfile
 
-RUN pnpm add axios@1.7.7 lodash@4.17.21 uuid@9.0.1 cheerio@1.0.0-rc.12 jsonwebtoken@9.0.2 --prod --no-lockfile
+# Rebuild isolated-vm for the container platform. Install build tools as
+# fallback in case prebuild-install cannot find a prebuilt binary.
+RUN apk add --no-cache --virtual .build-deps python3 make g++ && \
+    npm rebuild isolated-vm && \
+    apk del .build-deps
 
 # ==============================================================================
 # STAGE 2: Python runner build (@n8n/task-runner-python) with uv
@@ -76,12 +80,15 @@ RUN uv sync \
 			--all-extras \
       --no-editable
 
+# Install the python runner package itself into site packages. We can remove the src directory then
+RUN uv pip install . && rm -rf /app/task-runner-python/src
+
 # ==============================================================================
 # STAGE 3: Task Runner Launcher download
 # ==============================================================================
-FROM alpine:3.22.1 AS launcher-downloader
+FROM alpine:3.22 AS launcher-downloader
 ARG TARGETPLATFORM
-ARG LAUNCHER_VERSION=1.4.2
+ARG LAUNCHER_VERSION=1.4.3
 
 RUN set -e; \
     case "$TARGETPLATFORM" in \
@@ -123,6 +130,8 @@ COPY --from=node-alpine /usr/local/bin/node /usr/local/bin/node
 # libstdc++ is required by Node
 # libc6-compat is required by task-runner-launcher
 RUN apk add --no-cache ca-certificates tini libstdc++ libc6-compat && \
+    apk upgrade --no-cache && \
+    pip install --no-cache-dir "pip>=26.0" && \
     apk del apk-tools
 
 # Bring corepack and pnpm over, to make the image easier to extend

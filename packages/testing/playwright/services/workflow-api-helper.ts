@@ -82,6 +82,42 @@ export class WorkflowApiHelper {
 		}
 	}
 
+	async update(
+		workflowId: string,
+		versionId: string,
+		data: Partial<IWorkflowBase>,
+	): Promise<IWorkflowBase> {
+		const response = await this.api.request.patch(`/rest/workflows/${workflowId}`, {
+			data: {
+				...data,
+				versionId,
+			},
+		});
+
+		if (!response.ok()) {
+			throw new TestError(`Failed to update workflow: ${await response.text()}`);
+		}
+
+		const result = await response.json();
+		return result.data ?? result;
+	}
+
+	/** Triggers a manual workflow execution from a specific trigger node. */
+	async runManually(workflowId: string, triggerNodeName: string): Promise<{ executionId: string }> {
+		const response = await this.api.request.post(`/rest/workflows/${workflowId}/run`, {
+			data: {
+				triggerToStartFrom: { name: triggerNodeName },
+			},
+		});
+
+		if (!response.ok()) {
+			throw new TestError(`Failed to run workflow: ${await response.text()}`);
+		}
+
+		const result = await response.json();
+		return result.data ?? result;
+	}
+
 	async deactivate(workflowId: string) {
 		const response = await this.api.request.post(`/rest/workflows/${workflowId}/deactivate`);
 
@@ -106,6 +142,27 @@ export class WorkflowApiHelper {
 		}
 	}
 
+	async shareWorkflow(workflowId: string, shareWithIds: string[]) {
+		const response = await this.api.request.put(`/rest/workflows/${workflowId}/share`, {
+			data: { shareWithIds },
+		});
+
+		if (!response.ok()) {
+			throw new TestError(`Failed to share workflow: ${await response.text()}`);
+		}
+	}
+
+	async getWorkflows() {
+		const response = await this.api.request.get('/rest/workflows');
+
+		if (!response.ok()) {
+			throw new TestError(`Failed to get workflows: ${await response.text()}`);
+		}
+
+		const result = await response.json();
+		return result.data ?? result;
+	}
+
 	async transfer(workflowId: string, destinationProjectId: string) {
 		const response = await this.api.request.put(`/rest/workflows/${workflowId}/transfer`, {
 			data: { destinationProjectId },
@@ -113,6 +170,31 @@ export class WorkflowApiHelper {
 
 		if (!response.ok()) {
 			throw new TestError(`Failed to transfer workflow: ${await response.text()}`);
+		}
+	}
+
+	/**
+	 * Set tags on a workflow via API
+	 * @param workflowId - The workflow ID
+	 * @param tagIds - Array of tag IDs to assign to the workflow
+	 */
+	async setTags(workflowId: string, tagIds: string[]): Promise<void> {
+		const getResponse = await this.api.request.get(`/rest/workflows/${workflowId}`);
+		if (!getResponse.ok()) {
+			throw new TestError(`Failed to get workflow: ${await getResponse.text()}`);
+		}
+		const workflowData = await getResponse.json();
+		const workflow = workflowData.data ?? workflowData;
+
+		const response = await this.api.request.patch(`/rest/workflows/${workflowId}`, {
+			data: {
+				versionId: workflow.versionId,
+				tags: tagIds,
+			},
+		});
+
+		if (!response.ok()) {
+			throw new TestError(`Failed to set workflow tags: ${await response.text()}`);
 		}
 	}
 
@@ -151,6 +233,16 @@ export class WorkflowApiHelper {
 					node.parameters.path = webhookPath;
 					// Extract HTTP method from webhook node, default to GET
 					webhookMethod = (node.parameters.httpMethod as typeof webhookMethod) ?? 'GET';
+				}
+
+				// Handle MCP Trigger nodes - make their paths unique
+				// Note: webhookId is required for isFullPath: true webhooks to work correctly.
+				// Without it, the webhook path becomes workflowId/nodeName/path instead of just path.
+				if (node.type === '@n8n/n8n-nodes-langchain.mcpTrigger') {
+					const mcpId = nanoid(idLength);
+					const currentPath = (node.parameters.path as string) ?? 'mcp';
+					node.parameters.path = `${currentPath}-${mcpId}`;
+					node.webhookId = mcpId;
 				}
 			}
 		}
@@ -245,7 +337,11 @@ export class WorkflowApiHelper {
 		return result.data ?? result;
 	}
 
-	async waitForExecution(workflowId: string, timeoutMs = 10000): Promise<ExecutionListResponse> {
+	async waitForExecution(
+		workflowId: string,
+		timeoutMs = 10000,
+		mode: 'manual' | 'webhook' | 'trigger' | 'integrated' = 'webhook',
+	): Promise<ExecutionListResponse> {
 		const initialExecutions = await this.getExecutions(workflowId, 50);
 		const initialCount = initialExecutions.length;
 		const startTime = Date.now();
@@ -257,7 +353,8 @@ export class WorkflowApiHelper {
 				for (const execution of executions.slice(0, executions.length - initialCount)) {
 					const isCompleted = execution.status === 'success' || execution.status === 'error';
 					const isCorrectWorkflow = execution.workflowId === workflowId;
-					if (isCompleted && isCorrectWorkflow) {
+					const isCorrectMode = execution.mode === mode;
+					if (isCompleted && isCorrectWorkflow && isCorrectMode) {
 						return execution;
 					}
 				}
@@ -266,7 +363,8 @@ export class WorkflowApiHelper {
 			for (const execution of executions) {
 				const isCompleted = execution.status === 'success' || execution.status === 'error';
 				const isCorrectWorkflow = execution.workflowId === workflowId;
-				if (isCompleted && isCorrectWorkflow && execution.mode === 'webhook') {
+				const isCorrectMode = execution.mode === mode;
+				if (isCompleted && isCorrectWorkflow && isCorrectMode) {
 					const executionTime = new Date(
 						execution.startedAt ?? execution.createdAt ?? Date.now(),
 					).getTime();
