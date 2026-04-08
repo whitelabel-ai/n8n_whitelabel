@@ -18,11 +18,12 @@ import assert from 'node:assert';
 
 import { loadMemory } from '@utils/agent-execution';
 import { getPromptInputByType } from '@utils/helpers';
+import { TrackingCallbackHandler } from '@utils/tracking';
+import { buildTracingMetadata, getTracingConfig } from '@utils/tracing';
 import {
 	getOptionalOutputParser,
 	type N8nOutputParser,
 } from '@utils/output_parsers/N8nOutputParser';
-import { buildTracingMetadata, getTracingConfig } from '@utils/tracing';
 
 import {
 	fixEmptyContentMessage,
@@ -284,14 +285,20 @@ export async function toolsAgentExecute(
 				memory,
 				fallbackModel,
 			);
+			const trackingWebhookUrl = process.env.N8N_AI_TRACKING_WEBHOOK_URL;
+			const additionalCallbacks = trackingWebhookUrl
+				? [new TrackingCallbackHandler(this, trackingWebhookUrl, itemIndex)]
+				: undefined;
+
 			const additionalMetadata = buildTracingMetadata(options.tracingMetadata?.values, this.logger);
 			if (Object.keys(additionalMetadata).length > 0) {
 				this.logger.debug('Tracing metadata', { additionalMetadata });
 			}
 			const tracingConfig = isExecuteFunctions(this)
-				? getTracingConfig(this, { additionalMetadata })
-				: undefined;
+				? getTracingConfig(this, { additionalMetadata, additionalCallbacks })
+				: getTracingConfig(this, { additionalCallbacks });
 			const executorWithTracing = tracingConfig ? executor.withConfig(tracingConfig) : executor;
+
 			// Invoke with fallback logic
 			const invokeParams = {
 				input,
@@ -312,7 +319,7 @@ export async function toolsAgentExecute(
 			) {
 				// Get chat history respecting the context window length configured in memory
 				const chatHistory = memory ? await loadMemory(memory, model) : undefined;
-				const eventStream = executor.streamEvents(
+				const eventStream = executorWithTracing.streamEvents(
 					{
 						...invokeParams,
 						chat_history: chatHistory ?? undefined,

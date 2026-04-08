@@ -10,6 +10,7 @@ import {
 } from '@utils/agent-execution';
 import { buildResponseMetadata } from '@utils/agent-execution/buildResponseMetadata';
 import { buildTracingMetadata, getTracingConfig } from '@utils/tracing';
+import { TrackingCallbackHandler } from '@utils/tracking';
 import type {
 	EngineRequest,
 	EngineResponse,
@@ -60,13 +61,18 @@ export async function runAgent(
 	};
 	const executeOptions = { signal: ctx.getExecutionCancelSignal() };
 	const logger = 'logger' in ctx ? ctx.logger : undefined;
+	const trackingWebhookUrl = process.env.N8N_AI_TRACKING_WEBHOOK_URL;
+	const additionalCallbacks = trackingWebhookUrl
+		? [new TrackingCallbackHandler(ctx, trackingWebhookUrl, itemIndex)]
+		: undefined;
+
 	const additionalMetadata = buildTracingMetadata(options.tracingMetadata?.values, logger);
 	if (Object.keys(additionalMetadata).length > 0 && logger) {
 		ctx.logger.debug('Tracing metadata', { additionalMetadata });
 	}
 	const tracingConfig = isExecuteFunctions(ctx)
-		? getTracingConfig(ctx, { additionalMetadata })
-		: undefined;
+		? getTracingConfig(ctx, { additionalMetadata, additionalCallbacks })
+		: getTracingConfig(ctx, { additionalCallbacks });
 	const executorWithTracing = tracingConfig ? executor.withConfig(tracingConfig) : executor;
 
 	// Check if streaming is actually available
