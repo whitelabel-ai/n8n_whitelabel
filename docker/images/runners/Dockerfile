@@ -26,9 +26,9 @@ RUN node -e "const pkg = require('./package.json'); \
     delete pkg.devDependencies; \
     require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2));"
 
-# Install moment (special case for backwards compatibility)
+# Install selected third-party modules used by Code node JavaScript sandbox
 RUN rm -f node_modules/.modules.yaml && \
-    pnpm add moment@2.30.1 --prod --no-lockfile
+    pnpm add moment@2.30.1 xlsx@0.18.5 --prod --no-lockfile
 
 # Rebuild isolated-vm for the container platform. Install build tools as
 # fallback in case prebuild-install cannot find a prebuilt binary.
