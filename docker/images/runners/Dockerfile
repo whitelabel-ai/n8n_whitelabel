@@ -156,7 +156,11 @@ RUN uv pip install -p /opt/runners/task-runner-python/.venv/bin/python \
     httpx==0.27.2 \
     pytz==2024.1 \
     python-dateutil==2.9.0.post0 \
-    Unidecode==1.3.7
+    Unidecode==1.3.7 \
+    openpyxl==3.1.5 \
+    pandas==2.2.3 \
+    numpy==2.1.2 \
+    beautifulsoup4==4.12.3
 
 USER runner
 
