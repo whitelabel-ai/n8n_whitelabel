@@ -25,6 +25,7 @@ packages/**/.turbo
 *.swp
 CHANGELOG-*.md
 *.mdx
+!packages/frontend/@n8n/design-system/**/*.mdx
 build-storybook.log
 build.log
 *.junit.xml
@@ -60,6 +61,7 @@ Pedro/
 .data/
 .claude/settings.local.json
 .claude/plans/
+.claude/worktrees/
 .cursor/plans/
 .superset
 .conductor
