@@ -28,7 +28,7 @@ RUN node -e "const pkg = require('./package.json'); \
 
 # Install selected third-party modules used by Code node JavaScript sandbox
 RUN rm -f node_modules/.modules.yaml && \
-    pnpm add moment@2.30.1 xlsx@0.18.5 --prod --no-lockfile
+    pnpm add moment@2.30.1 xlsx@0.18.5 cheerio@1.0.0-rc.6 --prod --no-lockfile
 
 # Rebuild isolated-vm for the container platform. Install build tools as
 # fallback in case prebuild-install cannot find a prebuilt binary.
