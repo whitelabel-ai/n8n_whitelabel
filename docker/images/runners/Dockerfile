@@ -30,11 +30,7 @@ RUN node -e "const pkg = require('./package.json'); \
 RUN rm -f node_modules/.modules.yaml && \
     pnpm add \
     moment@2.30.1 \
-    axios@1.8.1 \
-    lodash@4.17.21 \
-    uuid@11.0.5 \
     cheerio@1.0.0-rc.6 \
-    jsonwebtoken@9.0.2 \
     xlsx@0.18.5 \
     xlsx-populate@1.21.0 \
     exceljs@4.4.0 \
