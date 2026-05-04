@@ -1,4 +1,4 @@
-name: CI - Build & Push n8n Image
+name: CI - Build & Push Runners Image
 
 on:
   push:
@@ -9,19 +9,19 @@ env:
   NODE_OPTIONS: '--max-old-space-size=7168'
   NODE_VERSION: '24.14.1'
   REGISTRY: registry.whitelabel.lat
-  IMAGE_NAME: whitelabel-ai/n8n-v2
-  REGISTRY_IMAGE: registry.whitelabel.lat/whitelabel-ai/n8n-v2
+  RUNNERS_IMAGE_NAME: whitelabel-ai/runners-v2
+  REGISTRY_RUNNERS_IMAGE: registry.whitelabel.lat/whitelabel-ai/runners-v2
 
 permissions:
   contents: read
 
 concurrency:
-  group: deploy-n8n-image-${{ github.ref }}
+  group: deploy-runners-image-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build-and-push:
-    name: Build and Push Image
+    name: Build and Push Runners Image
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -52,11 +52,11 @@ jobs:
         run: |
           node -e "process.stdout.write('PACKAGE_VERSION=' + require('./package.json').version + '\n')" >> "$GITHUB_ENV"
 
-      - name: Build and push image
+      - name: Build and push task runners image
         uses: useblacksmith/build-push-action@30c71162f16ea2c27c3e21523255d209b8b538c1 # v2
         with:
           context: .
-          file: docker/images/n8n/Dockerfile
+          file: docker/images/runners/Dockerfile
           platforms: linux/amd64
           build-args: |
             NODE_VERSION=${{ env.NODE_VERSION }}
@@ -68,5 +68,5 @@ jobs:
           cache-to: type=gha,mode=max
           push: true
           tags: |
-            ${{ env.REGISTRY_IMAGE }}:latest
-            ${{ env.REGISTRY_IMAGE }}:${{ env.PACKAGE_VERSION }}
+            ${{ env.REGISTRY_RUNNERS_IMAGE }}:latest
+            ${{ env.REGISTRY_RUNNERS_IMAGE }}:${{ env.PACKAGE_VERSION }}
