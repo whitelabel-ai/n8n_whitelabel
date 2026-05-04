@@ -28,7 +28,25 @@ RUN node -e "const pkg = require('./package.json'); \
 
 # Install selected third-party modules used by Code node JavaScript sandbox
 RUN rm -f node_modules/.modules.yaml && \
-    pnpm add moment@2.30.1 xlsx@0.18.5 xlsx-populate@1.21.0 cheerio@1.0.0-rc.6 --prod --no-lockfile
+    pnpm add \
+    moment@2.30.1 \
+    axios@1.8.1 \
+    lodash@4.17.21 \
+    uuid@11.0.5 \
+    cheerio@1.0.0-rc.6 \
+    jsonwebtoken@9.0.2 \
+    xlsx@0.18.5 \
+    xlsx-populate@1.21.0 \
+    exceljs@4.4.0 \
+    papaparse@5.5.2 \
+    csv-parse@5.6.0 \
+    date-fns@4.1.0 \
+    luxon@3.5.0 \
+    mathjs@14.2.1 \
+    pdf-lib@1.17.1 \
+    pdfkit@0.16.0 \
+    jszip@3.10.1 \
+    --prod --no-lockfile
 
 # Rebuild isolated-vm for the container platform. Install build tools as
 # fallback in case prebuild-install cannot find a prebuilt binary.
@@ -158,9 +176,31 @@ RUN uv pip install -p /opt/runners/task-runner-python/.venv/bin/python \
     python-dateutil==2.9.0.post0 \
     Unidecode==1.3.7 \
     openpyxl==3.1.5 \
+    xlsxwriter==3.2.0 \
     pandas==2.2.3 \
     numpy==2.1.2 \
-    beautifulsoup4==4.12.3
+    beautifulsoup4==4.12.3 \
+    lxml==5.3.0 \
+    Pillow==11.0.0 \
+    pydantic==2.10.4 \
+    Jinja2==3.1.5 \
+    PyJWT==2.10.1 \
+    cryptography==44.0.0 \
+    regex==2024.11.6 \
+    charset-normalizer==3.4.1 \
+    msgpack==1.1.0 \
+    orjson==3.10.13 \
+    qrcode==8.0 \
+    pypdf==5.1.0 \
+    tabulate==0.9.0 \
+    networkx==3.4.2 \
+    python-slugify==8.0.4 \
+    phonenumbers==8.13.52 \
+    email-validator==2.2.0 \
+    matplotlib==3.10.0 \
+    seaborn==0.13.2 \
+    reportlab==4.2.5 \
+    fpdf2==2.8.2
 
 USER runner
 
