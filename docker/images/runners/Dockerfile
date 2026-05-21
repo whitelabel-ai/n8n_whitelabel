@@ -196,7 +196,9 @@ RUN uv pip install -p /opt/runners/task-runner-python/.venv/bin/python \
     matplotlib==3.10.0 \
     seaborn==0.13.2 \
     reportlab==4.2.5 \
-    fpdf2==2.8.2
+    fpdf2==2.8.2 \
+    pymupdf==1.27.2 \
+    opencv-python-headless==4.11.0.86
 
 USER runner
 
