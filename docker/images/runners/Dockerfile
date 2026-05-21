@@ -4,7 +4,7 @@ ARG PYTHON_VERSION=3.13
 # ==============================================================================
 # STAGE 1: JavaScript runner (@n8n/task-runner) artifact from CI
 # ==============================================================================
-FROM node:${NODE_VERSION}-alpine3.23 AS javascript-runner-builder
+FROM node:${NODE_VERSION}-bookworm-slim AS javascript-runner-builder
 COPY ./dist/task-runner-javascript /app/task-runner-javascript
 
 WORKDIR /app/task-runner-javascript
@@ -46,22 +46,29 @@ RUN rm -f node_modules/.modules.yaml && \
 
 # Rebuild isolated-vm for the container platform. Install build tools as
 # fallback in case prebuild-install cannot find a prebuilt binary.
-RUN apk add --no-cache --virtual .build-deps python3 make g++ && \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 make g++ && \
     npm rebuild isolated-vm && \
-    apk del .build-deps
+    apt-get purge -y python3 make g++ && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 
 # ==============================================================================
 # STAGE 2: Python runner build (@n8n/task-runner-python) with uv
 # Produces a relocatable venv tied to the python version used
 # ==============================================================================
-FROM python:${PYTHON_VERSION}-alpine AS python-runner-builder
+FROM python:${PYTHON_VERSION}-slim AS python-runner-builder
 ARG TARGETPLATFORM
 ARG UV_VERSION=0.8.14
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates wget tar && \
+    rm -rf /var/lib/apt/lists/*
+
 RUN set -e; \
   case "$TARGETPLATFORM" in \
-    "linux/amd64") UV_ARCH="x86_64-unknown-linux-musl" ;; \
-    "linux/arm64") UV_ARCH="aarch64-unknown-linux-musl" ;; \
+    "linux/amd64") UV_ARCH="x86_64-unknown-linux-gnu" ;; \
+    "linux/arm64") UV_ARCH="aarch64-unknown-linux-gnu" ;; \
     *) echo "Unsupported platform: $TARGETPLATFORM" >&2; exit 1 ;; \
   esac; \
   mkdir -p /tmp/uv && cd /tmp/uv; \
@@ -100,9 +107,13 @@ RUN uv pip install . && rm -rf /app/task-runner-python/src
 # ==============================================================================
 # STAGE 3: Task Runner Launcher download
 # ==============================================================================
-FROM alpine:3.23 AS launcher-downloader
+FROM debian:bookworm-slim AS launcher-downloader
 ARG TARGETPLATFORM
 ARG LAUNCHER_VERSION=1.4.5
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates wget tar && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN set -e; \
     case "$TARGETPLATFORM" in \
@@ -120,14 +131,9 @@ RUN set -e; \
     cd / && rm -rf /launcher-temp
 
 # ==============================================================================
-# STAGE 4: Node alpine base for JS task runner
+# STAGE 4: Runtime
 # ==============================================================================
-FROM node:${NODE_VERSION}-alpine3.23 AS node-alpine
-
-# ==============================================================================
-# STAGE 5: Runtime
-# ==============================================================================
-FROM python:${PYTHON_VERSION}-alpine AS runtime
+FROM python:${PYTHON_VERSION}-slim AS runtime
 ARG N8N_VERSION=snapshot
 ARG N8N_RELEASE_TYPE=dev
 
@@ -138,23 +144,22 @@ ENV NODE_ENV=production \
 # Bring `uv` over from python-runner-builder, to make the image easier to extend
 COPY --from=python-runner-builder /usr/local/bin/uv /usr/local/bin/uv
 
-# Bring node over from node-alpine
-COPY --from=node-alpine /usr/local/bin/node /usr/local/bin/node
-
-# libstdc++ is required by Node
-# libc6-compat is required by task-runner-launcher
-RUN apk add --no-cache ca-certificates tini libstdc++ libc6-compat && \
-    apk upgrade --no-cache && \
+# Install runtime dependencies. tini handles PID 1 signal forwarding; libstdc++6
+# is required by Node native modules.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates tini libstdc++6 && \
+    apt-get upgrade -y && \
     pip install --no-cache-dir "pip>=26.0" && \
-    apk del apk-tools
+    rm -rf /var/lib/apt/lists/*
 
-# Bring corepack and pnpm over, to make the image easier to extend
-COPY --from=node-alpine /usr/local/lib/node_modules/corepack /usr/local/lib/node_modules/corepack
+# Bring node, corepack and pnpm over from the JS builder stage (glibc-linked)
+COPY --from=javascript-runner-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=javascript-runner-builder /usr/local/lib/node_modules/corepack /usr/local/lib/node_modules/corepack
 RUN ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack && \
-		ln -s ../lib/node_modules/corepack/dist/pnpm.js /usr/local/bin/pnpm
+    ln -s ../lib/node_modules/corepack/dist/pnpm.js /usr/local/bin/pnpm
 
-RUN addgroup -g 1000 -S runner \
- && adduser  -u 1000 -S -G runner -h /home/runner -D runner
+RUN groupadd -r -g 1000 runner \
+ && useradd  -r -u 1000 -g runner -d /home/runner -m -s /usr/sbin/nologin runner
 
 WORKDIR /home/runner
 
