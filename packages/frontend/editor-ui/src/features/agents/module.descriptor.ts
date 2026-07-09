@@ -6,10 +6,17 @@ import {
 	AGENTS_LIST_VIEW,
 	AGENT_BUILDER_SETTINGS_VIEW,
 	AGENT_BUILDER_VIEW,
+	AGENT_PREVIEW_VIEW,
 	AGENT_TOOLS_MODAL_KEY,
 	AGENT_TOOL_CONFIG_MODAL_KEY,
 	AGENT_SKILL_MODAL_KEY,
-	AGENT_ADD_TRIGGER_MODAL_KEY,
+	AGENT_TASK_MODAL_KEY,
+	AGENT_SUB_AGENTS_MODAL_KEY,
+	AGENT_VECTOR_STORES_MODAL_KEY,
+	AGENT_JSON_IMPORT_MODAL_KEY,
+	AGENT_EPISODIC_MEMORY_CREDENTIAL_MODAL_KEY,
+	AGENT_EPISODIC_MEMORY_CREDENTIAL_TYPE,
+	AGENT_MODEL_CREDENTIAL_MODAL_KEY,
 	AGENT_VIEW,
 	AGENT_SESSIONS_LIST_VIEW,
 	AGENT_SESSION_DETAIL_VIEW,
@@ -45,6 +52,7 @@ export const AgentsModule: FrontendModuleDescription = {
 				open: false,
 				data: {
 					tools: [],
+					mcpServers: [],
 					onConfirm: () => {},
 				},
 			},
@@ -55,8 +63,8 @@ export const AgentsModule: FrontendModuleDescription = {
 			initialState: {
 				open: false,
 				data: {
+					kind: 'node',
 					toolRef: null,
-					existingToolNames: [],
 					onConfirm: () => {},
 				},
 			},
@@ -74,16 +82,75 @@ export const AgentsModule: FrontendModuleDescription = {
 			},
 		},
 		{
-			key: AGENT_ADD_TRIGGER_MODAL_KEY,
-			component: async () => await import('./components/AgentAddTriggerModal.vue'),
+			key: AGENT_TASK_MODAL_KEY,
+			component: async () => await import('./components/AgentTaskModal.vue'),
 			initialState: {
 				open: false,
 				data: {
 					projectId: '',
 					agentId: '',
-					connectedTriggers: [],
-					onConnectedTriggersChange: () => {},
-					onTriggerAdded: () => {},
+					isPublished: false,
+					onSaved: () => {},
+				},
+			},
+		},
+		{
+			key: AGENT_SUB_AGENTS_MODAL_KEY,
+			component: async () => await import('./components/AgentSubAgentsModal.vue'),
+			initialState: {
+				open: false,
+				data: {
+					agents: [],
+					onConfirm: () => {},
+				},
+			},
+		},
+		{
+			key: AGENT_VECTOR_STORES_MODAL_KEY,
+			component: async () => await import('./components/AgentVectorStoresModal.vue'),
+			initialState: {
+				open: false,
+				data: {
+					projectId: '',
+					agentId: '',
+					existingNames: [],
+					onConfirm: () => {},
+				},
+			},
+		},
+		{
+			key: AGENT_JSON_IMPORT_MODAL_KEY,
+			component: async () => await import('./components/AgentJsonImportModal.vue'),
+			initialState: {
+				open: false,
+				data: {
+					onConfirm: () => {},
+				},
+			},
+		},
+		{
+			key: AGENT_EPISODIC_MEMORY_CREDENTIAL_MODAL_KEY,
+			component: async () => await import('../ai/components/CredentialSelectorModal.vue'),
+			initialState: {
+				open: false,
+				data: {
+					credentialType: AGENT_EPISODIC_MEMORY_CREDENTIAL_TYPE,
+					displayName: 'OpenAI',
+					initialValue: null,
+					onSelect: () => {},
+				},
+			},
+		},
+		{
+			key: AGENT_MODEL_CREDENTIAL_MODAL_KEY,
+			component: async () => await import('../ai/components/CredentialSelectorModal.vue'),
+			initialState: {
+				open: false,
+				data: {
+					credentialType: '',
+					displayName: '',
+					initialValue: null,
+					onSelect: () => {},
 				},
 			},
 		},
@@ -126,6 +193,12 @@ export const AgentsModule: FrontendModuleDescription = {
 				{
 					name: AGENT_BUILDER_VIEW,
 					path: '',
+					props: true,
+					component: AgentBuilderView,
+				},
+				{
+					name: AGENT_PREVIEW_VIEW,
+					path: 'preview',
 					props: true,
 					component: AgentBuilderView,
 				},

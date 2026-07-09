@@ -22,27 +22,29 @@ import {
 } from '@n8n/db';
 import { In } from '@n8n/typeorm';
 import * as fastGlob from 'fast-glob';
-import { mock } from 'jest-mock-extended';
 import { type InstanceSettings } from 'n8n-core';
 import fsp from 'node:fs/promises';
 
+vi.mock('node:fs/promises');
+import type { Mock } from 'vitest';
+import { mock } from 'vitest-mock-extended';
+
 import type { VariablesService } from '@/environments.ee/variables/variables.service.ee';
-import type { DataTableRepository } from '@/modules/data-table/data-table.repository';
 import type { DataTableColumnRepository } from '@/modules/data-table/data-table-column.repository';
 import type { DataTableDDLService } from '@/modules/data-table/data-table-ddl.service';
+import type { DataTableRepository } from '@/modules/data-table/data-table.repository';
 import type { RedactionEnforcementService } from '@/modules/redaction/redaction-enforcement.service';
+import type { WorkflowHistoryService } from '@/workflows/workflow-history/workflow-history.service';
+import type { WorkflowService } from '@/workflows/workflow.service';
 
-import { SourceControlImportService } from '../source-control-import.service.ee';
 import type { SourceControlContextFactory } from '../source-control-context.factory';
+import { SourceControlImportService } from '../source-control-import.service.ee';
 import type { SourceControlScopedService } from '../source-control-scoped.service';
 import type { ExportableFolder } from '../types/exportable-folders';
 import type { ExportableProject } from '../types/exportable-project';
 import { SourceControlContext } from '../types/source-control-context';
 
-import type { WorkflowHistoryService } from '@/workflows/workflow-history/workflow-history.service';
-import type { WorkflowService } from '@/workflows/workflow.service';
-
-jest.mock('fast-glob');
+vi.mock('fast-glob');
 
 describe('SourceControlImportService', () => {
 	const workflowRepository = mock<WorkflowRepository>();
@@ -70,6 +72,11 @@ describe('SourceControlImportService', () => {
 	const globalAdminContext = new SourceControlContext(
 		Object.assign(new User(), { role: GLOBAL_ADMIN_ROLE }),
 		[],
+		[],
+	);
+	const globalMemberContext = new SourceControlContext(
+		Object.assign(new User(), { id: 'user1', role: GLOBAL_MEMBER_ROLE }),
+		[Object.assign(new Project(), { id: 'project1', name: 'Team Project 1', type: 'team' })],
 		[],
 	);
 
@@ -101,10 +108,13 @@ describe('SourceControlImportService', () => {
 		redactionEnforcementService,
 	);
 
-	const globMock = fastGlob.default as unknown as jest.Mock<Promise<string[]>, string[]>;
-	const fsReadFile = jest.spyOn(fsp, 'readFile');
+	const globMock = fastGlob.default as unknown as Mock<(...args: string[]) => Promise<string[]>>;
+	const fsReadFile = vi.spyOn(fsp, 'readFile');
 
-	beforeEach(() => jest.clearAllMocks());
+	beforeEach(() => {
+		vi.clearAllMocks();
+		sourceControlScopedService.getDataTablesInAdminProjectsFromContextFilter.mockReturnValue({});
+	});
 
 	describe('getRemoteVersionIdsFromFiles', () => {
 		const mockWorkflowFile = '/mock/workflow1.json';
@@ -163,6 +173,31 @@ describe('SourceControlImportService', () => {
 
 			expect(result).toHaveLength(0);
 		});
+
+		it('should read files in bounded batches and preserve order', async () => {
+			const fileCount = 45;
+			const files = Array.from({ length: fileCount }, (_, i) => `/mock/workflow${i}.json`);
+			globMock.mockResolvedValue(files);
+
+			// All reads of a batch start synchronously before any completes (the mock
+			// yields a microtask), so an unbounded implementation would reach 45 in flight
+			let inFlight = 0;
+			let maxInFlight = 0;
+			fsReadFile.mockImplementation(async (file) => {
+				inFlight++;
+				maxInFlight = Math.max(maxInFlight, inFlight);
+				await Promise.resolve();
+				inFlight--;
+				const index = /workflow(\d+)\.json$/.exec(file as string)?.[1];
+				return JSON.stringify({ id: `workflow${index}`, versionId: `v${index}` });
+			});
+
+			const result = await service.getRemoteVersionIdsFromFiles(globalAdminContext);
+
+			expect(maxInFlight).toBe(20);
+			expect(result).toHaveLength(fileCount);
+			expect(result.map((workflow) => workflow.id)).toEqual(files.map((_, i) => `workflow${i}`));
+		});
 	});
 
 	describe('importWorkflowFromWorkFolder', () => {
@@ -184,7 +219,16 @@ describe('SourceControlImportService', () => {
 				id: '1',
 				name: 'Workflow 1',
 				active: false,
-				nodes: [],
+				nodes: [
+					{
+						id: 'node-1',
+						name: 'Node 1',
+						type: 'n8n-nodes-base.noOp',
+						typeVersion: 1,
+						position: [0, 0],
+						parameters: {},
+					},
+				],
 				connections: {},
 				versionId: 'v1',
 				owner: {
@@ -192,6 +236,7 @@ describe('SourceControlImportService', () => {
 					personalEmail: 'user@example.com',
 				},
 				parentFolderId: null,
+				nodeGroups: [{ id: 'g1', name: 'Group 1', nodeIds: ['node-1'] }],
 			};
 			const mockWorkflowData2 = {
 				id: '2',
@@ -205,6 +250,7 @@ describe('SourceControlImportService', () => {
 					personalEmail: 'user@example.com',
 				},
 				parentFolderId: null,
+				nodeGroups: [],
 			};
 			const candidates = [
 				mock<SourceControlledFile>({ file: mockWorkflowFile1, id: mockWorkflowData1.id }),
@@ -234,6 +280,9 @@ describe('SourceControlImportService', () => {
 				expect.objectContaining({
 					id: mockWorkflowData1.id,
 					name: mockWorkflowData1.name,
+					nodes: mockWorkflowData1.nodes,
+					connections: mockWorkflowData1.connections,
+					nodeGroups: mockWorkflowData1.nodeGroups,
 				}),
 				['id'],
 			);
@@ -241,6 +290,9 @@ describe('SourceControlImportService', () => {
 				expect.objectContaining({
 					id: mockWorkflowData2.id,
 					name: mockWorkflowData2.name,
+					nodes: mockWorkflowData2.nodes,
+					connections: mockWorkflowData2.connections,
+					nodeGroups: mockWorkflowData2.nodeGroups,
 				}),
 				['id'],
 			);
@@ -289,6 +341,64 @@ describe('SourceControlImportService', () => {
 			expect(mockLogger.error).toHaveBeenCalledWith(
 				`Failed to parse workflow file ${mockWorkflowFile}`,
 				expect.any(Object),
+			);
+		});
+
+		it('should reset nodeGroups to empty when they are invalid', async () => {
+			const mockUserId = 'user-id-123';
+			const mockWorkflowFile = '/mock/workflow-bad-groups.json';
+			const mockWorkflowData = {
+				id: 'wf-1',
+				name: 'Workflow with bad groups',
+				active: false,
+				nodes: [
+					{
+						id: 'node-1',
+						name: 'Node 1',
+						type: 'n8n-nodes-base.noOp',
+						typeVersion: 1,
+						position: [0, 0],
+						parameters: {},
+					},
+				],
+				connections: {},
+				versionId: 'v1',
+				nodeGroups: [{ id: 'g1', name: 'Group 1', nodeIds: ['nonexistent-node'] }],
+				owner: { type: 'personal', personalEmail: 'user@example.com' },
+				parentFolderId: null,
+			};
+			const candidates = [
+				mock<SourceControlledFile>({ file: mockWorkflowFile, id: mockWorkflowData.id }),
+			];
+
+			projectRepository.getPersonalProjectForUserOrFail.mockResolvedValue(
+				Object.assign(new Project(), {
+					id: 'personal-project-id-123',
+					name: 'Personal Project',
+					type: 'personal',
+					createdAt: new Date(),
+					updatedAt: new Date(),
+				}),
+			);
+			workflowRepository.findByIds.mockResolvedValue([]);
+			folderRepository.find.mockResolvedValue([]);
+			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
+			workflowRepository.upsert.mockResolvedValue({
+				identifiers: [{ id: mockWorkflowData.id }],
+				generatedMaps: [],
+				raw: [],
+			});
+
+			fsReadFile.mockResolvedValueOnce(JSON.stringify(mockWorkflowData));
+
+			await service.importWorkflowFromWorkFolder(candidates, mockUserId);
+
+			expect(mockLogger.warn).toHaveBeenCalledWith(
+				`Workflow file ${mockWorkflowFile} has invalid nodeGroups, resetting to empty`,
+			);
+			expect(workflowRepository.upsert).toHaveBeenCalledWith(
+				expect.objectContaining({ id: mockWorkflowData.id, nodeGroups: [] }),
+				['id'],
 			);
 		});
 
@@ -1184,16 +1294,14 @@ describe('SourceControlImportService', () => {
 					}),
 				);
 
-				redactionEnforcementService.assertPolicyChangeAllowed.mockImplementationOnce(() => {
-					throw new Error(
-						'Workflow redaction policy is enforced at the instance level and cannot be modified.',
-					);
-				});
+				redactionEnforcementService.assertPolicyChangeAllowed.mockRejectedValueOnce(
+					new Error('Workflow redaction policy cannot be weaker than the instance floor.'),
+				);
 
 				const candidates = [mock<SourceControlledFile>({ file: mockWorkflowFile, id: '1' })];
 
 				await expect(service.importWorkflowFromWorkFolder(candidates, mockUserId)).rejects.toThrow(
-					'Workflow redaction policy is enforced at the instance level',
+					'Workflow redaction policy cannot be weaker than the instance floor.',
 				);
 
 				expect(redactionEnforcementService.assertPolicyChangeAllowed).toHaveBeenCalledWith(
@@ -1265,6 +1373,31 @@ describe('SourceControlImportService', () => {
 			const result = await service.getRemoteCredentialsFromFiles(globalAdminContext);
 
 			expect(result).toHaveLength(0);
+		});
+
+		it('should read files in bounded batches and preserve order', async () => {
+			const fileCount = 45;
+			const files = Array.from({ length: fileCount }, (_, i) => `/mock/credential${i}.json`);
+			globMock.mockResolvedValue(files);
+
+			// All reads of a batch start synchronously before any completes (the mock
+			// yields a microtask), so an unbounded implementation would reach 45 in flight
+			let inFlight = 0;
+			let maxInFlight = 0;
+			fsReadFile.mockImplementation(async (file) => {
+				inFlight++;
+				maxInFlight = Math.max(maxInFlight, inFlight);
+				await Promise.resolve();
+				inFlight--;
+				const index = /credential(\d+)\.json$/.exec(file as string)?.[1];
+				return JSON.stringify({ id: `cred${index}`, name: `Credential ${index}`, type: 'oauth2' });
+			});
+
+			const result = await service.getRemoteCredentialsFromFiles(globalAdminContext);
+
+			expect(maxInFlight).toBe(20);
+			expect(result).toHaveLength(fileCount);
+			expect(result.map((credential) => credential.id)).toEqual(files.map((_, i) => `cred${i}`));
 		});
 
 		it('should parse global credentials with isGlobal flag set to true', async () => {
@@ -1426,6 +1559,103 @@ describe('SourceControlImportService', () => {
 			// Verify the credential data was sanitized properly
 			const upsertCall = credentialsRepository.upsert.mock.calls[0][0] as Record<string, unknown>;
 			expect(upsertCall.data).toBeDefined();
+		});
+
+		it('should carry resolvable credential fields across environments', async () => {
+			// Arrange
+			const candidates: SourceControlledFile[] = [
+				{
+					file: '/mock/credential_stubs/cred1.json',
+					id: 'cred1',
+					name: 'Private Credential',
+					type: 'credential',
+					status: 'created',
+					location: 'local',
+					conflict: false,
+					updatedAt: '',
+				},
+			];
+
+			const mockCredentialData = {
+				id: 'cred1',
+				name: 'Private Credential',
+				type: 'oauth2Api',
+				data: {},
+				ownedBy: null,
+				isGlobal: false,
+				isResolvable: true,
+				resolvableAllowFallback: true,
+			};
+
+			fsReadFile.mockResolvedValue(JSON.stringify(mockCredentialData));
+			credentialsRepository.find.mockResolvedValue([]);
+			sharedCredentialsRepository.find.mockResolvedValue([]);
+			credentialsRepository.upsert.mockResolvedValue({
+				identifiers: [],
+				generatedMaps: [],
+				raw: [],
+			});
+
+			// Act
+			await service.importCredentialsFromWorkFolder(candidates, mockUserId);
+
+			// Assert
+			expect(credentialsRepository.upsert).toHaveBeenCalledWith(
+				expect.objectContaining({
+					id: 'cred1',
+					isResolvable: true,
+					resolvableAllowFallback: true,
+				}),
+				['id'],
+			);
+		});
+
+		it('should default resolver fields to false when absent from the stub', async () => {
+			// Arrange - a stub written before resolver fields were tracked omits them
+			const candidates: SourceControlledFile[] = [
+				{
+					file: '/mock/credential_stubs/cred1.json',
+					id: 'cred1',
+					name: 'Legacy Stub Credential',
+					type: 'credential',
+					status: 'created',
+					location: 'local',
+					conflict: false,
+					updatedAt: '',
+				},
+			];
+
+			const mockCredentialData = {
+				id: 'cred1',
+				name: 'Legacy Stub Credential',
+				type: 'oauth2Api',
+				data: {},
+				ownedBy: null,
+				isGlobal: false,
+			};
+
+			fsReadFile.mockResolvedValue(JSON.stringify(mockCredentialData));
+			credentialsRepository.find.mockResolvedValue([]);
+			sharedCredentialsRepository.find.mockResolvedValue([]);
+			credentialsRepository.upsert.mockResolvedValue({
+				identifiers: [],
+				generatedMaps: [],
+				raw: [],
+			});
+
+			// Act
+			await service.importCredentialsFromWorkFolder(candidates, mockUserId);
+
+			// Assert - git is the source of truth, so an absent flag defaults to false
+			// (same as isGlobal).
+			expect(credentialsRepository.upsert).toHaveBeenCalledWith(
+				expect.objectContaining({
+					id: 'cred1',
+					isResolvable: false,
+					resolvableAllowFallback: false,
+				}),
+				['id'],
+			);
 		});
 
 		it('should update an existing credential (verifies upsert is called)', async () => {
@@ -2083,7 +2313,7 @@ describe('SourceControlImportService', () => {
 
 	describe('getLocalVersionIdsFromDb', () => {
 		const now = new Date();
-		jest.useFakeTimers({ now });
+		vi.useFakeTimers({ now });
 
 		it('should replace invalid updatedAt with current timestamp', async () => {
 			const mockWorkflows = [
@@ -2818,7 +3048,7 @@ describe('SourceControlImportService', () => {
 					.mockResolvedValueOnce(JSON.stringify(mockDataTable2) as any);
 
 				// Act
-				const result = await service.getRemoteDataTablesFromFiles();
+				const result = await service.getRemoteDataTablesFromFiles(globalAdminContext);
 
 				// Assert
 				expect(result).toEqual([mockDataTable1, mockDataTable2]);
@@ -2833,7 +3063,7 @@ describe('SourceControlImportService', () => {
 				globMock.mockResolvedValue([]);
 
 				// Act
-				const result = await service.getRemoteDataTablesFromFiles();
+				const result = await service.getRemoteDataTablesFromFiles(globalAdminContext);
 
 				// Assert
 				expect(result).toEqual([]);
@@ -2859,10 +3089,54 @@ describe('SourceControlImportService', () => {
 					.mockResolvedValueOnce('invalid json' as any);
 
 				// Act
-				const result = await service.getRemoteDataTablesFromFiles();
+				const result = await service.getRemoteDataTablesFromFiles(globalAdminContext);
 
 				// Assert
 				expect(result).toEqual([mockDataTable]);
+			});
+
+			it('should return only data tables from authorized projects', async () => {
+				// Arrange
+				const authorizedDataTable = {
+					id: 'dt1',
+					name: 'Authorized Table',
+					ownedBy: { type: 'team', teamId: 'project1', teamName: 'Team Project 1' },
+					columns: [],
+					createdAt: '2024-01-01T00:00:00.000Z',
+					updatedAt: '2024-01-02T00:00:00.000Z',
+				};
+				const unauthorizedDataTable = {
+					id: 'dt2',
+					name: 'Unauthorized Table',
+					ownedBy: { type: 'team', teamId: 'project2', teamName: 'Team Project 2' },
+					columns: [],
+					createdAt: '2024-01-03T00:00:00.000Z',
+					updatedAt: '2024-01-04T00:00:00.000Z',
+				};
+				const unownedDataTable = {
+					id: 'dt3',
+					name: 'Unowned Table',
+					ownedBy: null,
+					columns: [],
+					createdAt: '2024-01-05T00:00:00.000Z',
+					updatedAt: '2024-01-06T00:00:00.000Z',
+				};
+
+				globMock.mockResolvedValue([
+					'/mock/n8n/git/datatables/dt1.json',
+					'/mock/n8n/git/datatables/dt2.json',
+					'/mock/n8n/git/datatables/dt3.json',
+				]);
+				fsReadFile
+					.mockResolvedValueOnce(JSON.stringify(authorizedDataTable) as any)
+					.mockResolvedValueOnce(JSON.stringify(unauthorizedDataTable) as any)
+					.mockResolvedValueOnce(JSON.stringify(unownedDataTable) as any);
+
+				// Act
+				const result = await service.getRemoteDataTablesFromFiles(globalMemberContext);
+
+				// Assert
+				expect(result).toEqual([authorizedDataTable, unownedDataTable]);
 			});
 		});
 
@@ -2889,7 +3163,7 @@ describe('SourceControlImportService', () => {
 				dataTableRepository.find.mockResolvedValue(mockDataTables as any);
 
 				// Act
-				const result = await service.getLocalDataTablesFromDb();
+				const result = await service.getLocalDataTablesFromDb(globalAdminContext);
 
 				// Assert
 				expect(result).toHaveLength(1);
@@ -2913,6 +3187,34 @@ describe('SourceControlImportService', () => {
 						'project.projectRelations',
 						'project.projectRelations.role',
 					],
+					where: {},
+				});
+			});
+
+			it('should scope database query to data tables in authorized projects', async () => {
+				// Arrange
+				const where = { project: { id: 'project1' } };
+				sourceControlScopedService.getDataTablesInAdminProjectsFromContextFilter.mockReturnValue(
+					where as any,
+				);
+				dataTableRepository.find.mockResolvedValue([]);
+
+				// Act
+				const result = await service.getLocalDataTablesFromDb(globalMemberContext);
+
+				// Assert
+				expect(result).toEqual([]);
+				expect(
+					sourceControlScopedService.getDataTablesInAdminProjectsFromContextFilter,
+				).toHaveBeenCalledWith(globalMemberContext);
+				expect(dataTableRepository.find).toHaveBeenCalledWith({
+					relations: [
+						'columns',
+						'project',
+						'project.projectRelations',
+						'project.projectRelations.role',
+					],
+					where,
 				});
 			});
 
@@ -2921,7 +3223,7 @@ describe('SourceControlImportService', () => {
 				dataTableRepository.find.mockResolvedValue([]);
 
 				// Act
-				const result = await service.getLocalDataTablesFromDb();
+				const result = await service.getLocalDataTablesFromDb(globalAdminContext);
 
 				// Assert
 				expect(result).toEqual([]);
@@ -2933,7 +3235,7 @@ describe('SourceControlImportService', () => {
 				dataTableRepository.find.mockRejectedValue(error);
 
 				// Act
-				const result = await service.getLocalDataTablesFromDb();
+				const result = await service.getLocalDataTablesFromDb(globalAdminContext);
 
 				// Assert
 				expect(result).toEqual([]);
@@ -2945,7 +3247,7 @@ describe('SourceControlImportService', () => {
 				dataTableRepository.find.mockRejectedValue(error);
 
 				// Act & Assert
-				await expect(service.getLocalDataTablesFromDb()).rejects.toThrow(
+				await expect(service.getLocalDataTablesFromDb(globalAdminContext)).rejects.toThrow(
 					'Database connection failed',
 				);
 			});
@@ -2983,8 +3285,8 @@ describe('SourceControlImportService', () => {
 				] as any);
 
 				const mockTransaction = {
-					save: jest.fn(async (_entity: any, data: any) => data),
-					delete: jest.fn(async () => {}),
+					save: vi.fn(async (_entity: any, data: any) => data),
+					delete: vi.fn(async () => {}),
 				};
 
 				Object.defineProperty(dataTableRepository, 'manager', {
@@ -2992,7 +3294,7 @@ describe('SourceControlImportService', () => {
 						connection: {
 							options: { type: 'sqlite' },
 						},
-						transaction: jest.fn(async (callback: any) => {
+						transaction: vi.fn(async (callback: any) => {
 							return await callback(mockTransaction);
 						}),
 					},
@@ -3292,7 +3594,7 @@ describe('SourceControlImportService', () => {
 					expect.arrayContaining([expect.objectContaining({ id: 'col1', name: 'validName' })]),
 					expect.anything(),
 				);
-				const columns = (dataTableDDLService.createTableWithColumns as jest.Mock).mock.calls[0][1];
+				const columns = (dataTableDDLService.createTableWithColumns as Mock).mock.calls[0][1];
 				expect(columns).not.toEqual(
 					expect.arrayContaining([expect.objectContaining({ id: 'col2' })]),
 				);

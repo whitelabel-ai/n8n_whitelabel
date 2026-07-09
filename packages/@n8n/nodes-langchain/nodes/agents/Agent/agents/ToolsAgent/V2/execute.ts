@@ -19,8 +19,9 @@ import {
 	getOptionalOutputParser,
 	type N8nOutputParser,
 } from '@utils/output_parsers/N8nOutputParser';
-import { TrackingCallbackHandler } from '@utils/tracking';
+import { wrapLangChainParserError } from '@utils/output_parsers/langchainParserError';
 import { buildTracingMetadata, getTracingConfig } from '@utils/tracing';
+import { TrackingCallbackHandler } from '@utils/tracking';
 import omit from 'lodash/omit';
 import { jsonParse, NodeOperationError, sleep } from 'n8n-workflow';
 import type { IExecuteFunctions, INodeExecutionData, ISupplyDataFunctions } from 'n8n-workflow';
@@ -313,6 +314,7 @@ export async function toolsAgentExecute(
 					maxIterations?: number;
 					returnIntermediateSteps?: boolean;
 					passthroughBinaryImages?: boolean;
+					passthroughBinaryPdfs?: boolean;
 					tracingMetadata?: { values?: Array<{ key: string; value: unknown }> };
 				};
 
@@ -320,6 +322,7 @@ export async function toolsAgentExecute(
 				const messages = await prepareMessages(this, itemIndex, {
 					systemMessage: options.systemMessage,
 					passthroughBinaryImages: options.passthroughBinaryImages ?? true,
+					passthroughBinaryPdfs: options.passthroughBinaryPdfs ?? false,
 					outputParser,
 				});
 				const prompt: ChatPromptTemplate = preparePrompt(messages);
@@ -410,7 +413,7 @@ export async function toolsAgentExecute(
 			batchResults.forEach((result, index) => {
 				const itemIndex = i + index;
 				if (result.status === 'rejected') {
-					const error = result.reason as Error;
+					const error = wrapLangChainParserError(result.reason, this.getNode(), itemIndex);
 					failedItems++;
 					if (this.continueOnFail()) {
 						returnData.push({

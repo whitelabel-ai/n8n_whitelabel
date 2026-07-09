@@ -33,10 +33,13 @@ import {
 } from '@/app/constants';
 import type { ExpressionLocalResolveContext } from '@/app/types/expressions';
 import useEnvironmentsStore from '@/features/settings/environments.ee/environments.store';
+import { useSettingsStore } from '@/app/stores/settings.store';
 import {
 	createWorkflowDocumentId,
+	disposeWorkflowDocumentStore,
 	useWorkflowDocumentStore,
 } from '@/app/stores/workflowDocument.store';
+import { disposeNDVStore, useNDVStore } from '@/features/ndv/shared/ndv.store';
 
 const props = defineProps<{
 	initialNode: INode;
@@ -48,6 +51,7 @@ const props = defineProps<{
 const emit = defineEmits<{
 	'update:valid': [isValid: boolean];
 	'update:node-name': [name: string];
+	'update:node': [node: INode];
 }>();
 
 const i18n = useI18n();
@@ -56,6 +60,7 @@ const credentialsStore = useCredentialsStore();
 const projectsStore = useProjectsStore();
 const nodeHelpers = useNodeHelpers();
 const environmentsStore = useEnvironmentsStore();
+const settingsStore = useSettingsStore();
 
 const node = shallowRef<INode | null>(props.initialNode);
 const userEditedName = ref(false);
@@ -92,15 +97,18 @@ const tabOptions = computed<Array<ITab<ToolSettingsTab>>>(() => {
 });
 
 const nodeSettings = computed(() =>
-	createCommonNodeSettings(true, i18n.baseText.bind(i18n)).filter(
-		(s) => s.name !== 'notes' && s.name !== 'notesInFlow',
-	),
+	createCommonNodeSettings(
+		true,
+		i18n.baseText.bind(i18n),
+		settingsStore.isOtelCustomSpanAttributesEnabled,
+	).filter((s) => s.name !== 'notes' && s.name !== 'notesInFlow'),
 );
 
 const settingsNodeValues = computed<INodeParameters>(() => {
 	if (!node.value) return { parameters: {} };
 	return {
 		parameters: deepCopy(node.value.parameters),
+		customTelemetryTags: deepCopy(node.value.customTelemetryTags ?? {}),
 	};
 });
 
@@ -199,6 +207,15 @@ function handleChangeSettingsValue(updateData: IUpdateInformation) {
 			...node.value,
 			parameters: newParameters,
 		};
+	} else if (updateData.name.includes('.') || updateData.name.includes('[')) {
+		const newNode = deepCopy(node.value);
+		setParameterValue(newNode as unknown as INodeParameters, updateData.name, updateData.value);
+
+		if (newNode.customTelemetryTags?.tag?.length === 0) {
+			newNode.customTelemetryTags = {};
+		}
+
+		node.value = newNode;
 	} else {
 		node.value = { ...node.value, [updateData.name]: updateData.value };
 	}
@@ -303,6 +320,16 @@ watch(isValid, (val) => {
 });
 
 watch(
+	node,
+	(updatedNode) => {
+		if (updatedNode) {
+			emit('update:node', updatedNode);
+		}
+	},
+	{ immediate: true },
+);
+
+watch(
 	() => node.value?.name,
 	(name) => {
 		if (name) {
@@ -341,6 +368,13 @@ onMounted(async () => {
 onBeforeUnmount(() => {
 	// Clear current project to avoid side effects
 	projectsStore.setCurrentProject(null);
+
+	// Dispose the scoped document store and the NDV store its descendants
+	// materialize — Pinia stores are not freed on unmount. The doc id is a
+	// constant and only one tool-config host is mounted at a time.
+	const documentStore = workflowDocumentStore.value;
+	disposeNDVStore(useNDVStore(documentStore.documentId));
+	disposeWorkflowDocumentStore(documentStore);
 });
 
 defineExpose({ node, isValid, nodeTypeDescription, handleChangeName });
@@ -378,6 +412,9 @@ defineExpose({ node, isValid, nodeTypeDescription, handleChangeName });
 						@credential-selected="handleChangeCredential"
 						@value-changed="handleChangeParameter"
 					/>
+					<div v-if="$slots.commonSettings" :class="$style.commonSettings">
+						<slot name="commonSettings" />
+					</div>
 				</ParameterInputList>
 				<div v-if="showNoParametersNotice" :class="$style.noParameters">
 					<N8nText>
@@ -436,6 +473,10 @@ defineExpose({ node, isValid, nodeTypeDescription, handleChangeName });
 }
 
 .noParameters {
+	margin-top: var(--spacing--xs);
+}
+
+.commonSettings {
 	margin-top: var(--spacing--xs);
 }
 </style>

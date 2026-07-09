@@ -1,7 +1,7 @@
 import { Logger } from '@n8n/backend-common';
 import { CredentialsRepository, SharedCredentialsRepository } from '@n8n/db';
 import { Service } from '@n8n/di';
-import type { Tool } from '@langchain/core/tools';
+import { Tool as LangChainTool, type Tool as LangChainToolType } from '@langchain/core/tools';
 import { ExecuteContext, StructuredToolkit, SupplyDataContext } from 'n8n-core';
 import type {
 	CloseFunction,
@@ -25,6 +25,7 @@ import {
 import { v4 as uuid } from 'uuid';
 
 import { NodeTypes } from '@/node-types';
+import { withExpressionIsolate } from '@/utils';
 import { getBase } from '@/workflow-execute-additional-data';
 
 /** Minimal tool shape for constructing an in-memory single-node execution. */
@@ -58,6 +59,30 @@ export interface NodeExecutionResult {
 
 // send and wait requires persistent workflows to handle the wait logic
 const OPERATION_BLACKLIST = [SEND_AND_WAIT_OPERATION, 'dispatchAndWait'];
+
+/**
+ * Node types that must never run as an agent tool, regardless of RBAC —
+ * they grant command execution or arbitrary file-system access, which is a
+ * different trust tier than "call an API with a shared credential". This is
+ * a defense-in-depth backstop applied to every execution path (chat,
+ * published integrations, tasks, workflows), independent of the per-user
+ * access checks applied when building the tool list.
+ */
+export const AGENT_TOOL_NODE_DENYLIST = new Set<string>([
+	'n8n-nodes-base.executeCommand',
+	'n8n-nodes-base.ssh',
+	'n8n-nodes-base.readWriteFile',
+]);
+
+/**
+ * The node-types resolver may hand us the `*Tool` variant of a node
+ * (e.g. `executeCommand` -> `executeCommandTool`, see `resolveToolNodeType`
+ * in `node-tool-factory.ts`). Strip that suffix before checking the denylist
+ * so both the base and tool-wrapped forms are caught.
+ */
+function stripAgentToolSuffix(nodeType: string): string {
+	return nodeType.endsWith('Tool') ? nodeType.slice(0, -'Tool'.length) : nodeType;
+}
 
 /**
  * Vendor-API nodes the agent runtime can execute even though they aren't
@@ -211,6 +236,12 @@ export class EphemeralNodeExecutor {
 		typeVersion: number,
 		nodeParameters: INodeParameters,
 	): void {
+		if (AGENT_TOOL_NODE_DENYLIST.has(stripAgentToolSuffix(nodeType))) {
+			throw new UserError('Node type is not permitted for agent tool execution', {
+				extra: { nodeType },
+			});
+		}
+
 		const resolved = this.nodeTypes.getByNameAndVersion(nodeType, typeVersion);
 
 		if (!isUsableAsAgentTool(resolved.description) && !isAgentProviderNode(nodeType)) {
@@ -296,35 +327,43 @@ export class EphemeralNodeExecutor {
 
 		const nodeType = this.nodeTypes.getByNameAndVersion(tool.nodeType, tool.nodeTypeVersion);
 
-		if (!nodeType.execute) {
-			return { status: 'error', data: [], error: 'Node type does not have an execute method' };
-		}
-
-		let output: NodeOutput;
+		let output: NodeOutput | undefined;
 		try {
-			output =
-				nodeType instanceof Node
-					? await nodeType.execute(context)
-					: await nodeType.execute.call(context);
+			const executionResult = await withExpressionIsolate(
+				parts.workflow,
+				async (): Promise<NodeExecutionResult> => {
+					if (!nodeType.execute) {
+						return {
+							status: 'error',
+							data: [],
+							error: 'Node type does not have an execute method',
+						};
+					}
+					output =
+						nodeType instanceof Node
+							? await nodeType.execute(context)
+							: await nodeType.execute.call(context);
+					if (!Array.isArray(output) || !output[0]) {
+						return { status: 'error', data: [], error: 'No output data' };
+					}
+					return { status: 'success', data: output[0] };
+				},
+			);
+			return executionResult;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.logger.debug('Node execution failed', { nodeType: tool.nodeType, error: message });
 			return { status: 'error', data: [], error: message };
 		}
-
-		if (!Array.isArray(output) || !output[0]) {
-			return { status: 'error', data: [], error: 'No output data' };
-		}
-		return { status: 'success', data: output[0] };
 	}
 
 	async executeInline(request: InlineNodeExecutionRequest): Promise<NodeExecutionResult> {
 		// Validation failures (unknown node type, trigger nodes, blacklisted
 		// operations like send-and-wait) need to surface to the agent as a
 		// tool error rather than crashing silently. Returning the standard
-		// `{ status: 'error', error }` shape lets `run_node_tool` translate
-		// it into a tool-result the LLM sees AND lets the ExecutionRecorder
-		// record it as a failed tool call in the session timeline.
+		// `{ status: 'error', error }` shape lets node tools surface the error
+		// to the LLM and lets the ExecutionRecorder record it as a failed tool
+		// call in the session timeline.
 		try {
 			this.validateNodeForExecution(
 				request.nodeType,
@@ -395,7 +434,7 @@ export class EphemeralNodeExecutor {
 	private async withSupplyDataTool<T>(
 		tool: EphemeralWorkflowToolLike,
 		inputItems: INodeExecutionData[],
-		onTool: (response: Tool | StructuredToolkit) => Promise<T> | T,
+		onTool: (response: LangChainToolType | StructuredToolkit) => Promise<T> | T,
 	): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
 		const parts = await this.buildEphemeralContextParts(tool, inputItems);
 		const closeFunctions: CloseFunction[] = [];
@@ -421,7 +460,10 @@ export class EphemeralNodeExecutor {
 
 		try {
 			const supplyDataResult = await nodeType.supplyData.call(context, 0);
-			const response = supplyDataResult.response as Tool | StructuredToolkit | undefined;
+			const response = supplyDataResult.response as
+				| LangChainToolType
+				| StructuredToolkit
+				| undefined;
 
 			if (response instanceof StructuredToolkit) {
 				return { ok: true, value: await onTool(response) };
@@ -513,6 +555,7 @@ export class EphemeralNodeExecutor {
 			// through to its `{ input: string }` default; proper per-method
 			// introspection ships with multi-tool expansion.
 			if (response instanceof StructuredToolkit) return null;
+			if (response instanceof LangChainTool) return null;
 			const maybeSchema = (response as unknown as { schema?: unknown }).schema;
 			return maybeSchema ?? null;
 		});
