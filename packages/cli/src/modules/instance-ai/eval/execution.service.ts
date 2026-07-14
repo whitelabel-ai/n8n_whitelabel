@@ -40,6 +40,7 @@ import {
 import { randomUUID } from 'node:crypto';
 
 import { ActiveExecutions } from '@/active-executions';
+import { LoadNodesAndCredentials } from '@/load-nodes-and-credentials';
 import { NodeTypes } from '@/node-types';
 import { PostHogClient } from '@/posthog';
 import { WorkflowRunner } from '@/workflow-runner';
@@ -90,6 +91,7 @@ export class EvalExecutionService {
 		private readonly executionsConfig: ExecutionsConfig,
 		private readonly binaryDataService: BinaryDataService,
 		private readonly workflowStaticDataService: WorkflowStaticDataService,
+		private readonly loadNodesAndCredentials: LoadNodesAndCredentials,
 	) {}
 
 	async executeWithLlmMock(
@@ -290,6 +292,7 @@ export class EvalExecutionService {
 							globalContext || scenarioHints
 								? { dataDescription: globalContext, testScenario: scenarioHints }
 								: undefined,
+						outputSchemaLookup: this.loadNodesAndCredentials.createOutputSchemaLookup(),
 					}),
 			);
 
@@ -343,6 +346,20 @@ export class EvalExecutionService {
 		for (const node of workflowEntity.nodes) {
 			if (node.disabled || !node.parameters) continue;
 			fillSetupPendingResourceLocators(node.parameters);
+		}
+
+		// Time-based Wait nodes park the execution until a future timestamp
+		// (specificTime) or sleep away the scenario budget (timeInterval), so
+		// downstream nodes never run inside the eval window even when the built
+		// workflow is correct. Zero them — execution order and branch structure
+		// stay observable, and the verifier still sees the builder's original
+		// wait config in the workflow JSON. Webhook/form-resume waits are left
+		// untouched (they model an external event, not the passage of time).
+		for (const node of workflowEntity.nodes) {
+			if (node.disabled || node.type !== 'n8n-nodes-base.wait') continue;
+			const resume = node.parameters?.resume;
+			if (resume === 'webhook' || resume === 'form') continue;
+			node.parameters = { ...node.parameters, resume: 'timeInterval', amount: 0, unit: 'seconds' };
 		}
 
 		const workflow = this.buildWorkflow(workflowEntity);
