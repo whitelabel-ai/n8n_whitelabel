@@ -7,7 +7,7 @@ on:
 
 env:
   NODE_OPTIONS: '--max-old-space-size=7168'
-  NODE_VERSION: '24.16.0'
+  NODE_VERSION: '24.18.0'
   REGISTRY: registry.whitelabel.lat
   RUNNERS_IMAGE_NAME: whitelabel-ai/runners-v2
   REGISTRY_RUNNERS_IMAGE: registry.whitelabel.lat/whitelabel-ai/runners-v2
