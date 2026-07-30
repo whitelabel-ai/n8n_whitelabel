@@ -80,7 +80,7 @@ export class LoadNodesAndCredentials {
 			.filter(Boolean)
 			.join(delimiter);
 
-		// @ts-ignore
+		// @ts-expect-error Node internal _initPaths
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-call
 		module.constructor._initPaths();
 
@@ -656,11 +656,11 @@ export class LoadNodesAndCredentials {
 	}
 
 	async setupHotReload() {
-		const { default: debounce } = await import('lodash/debounce');
+		const { default: debounce } = await import('lodash/debounce.js');
 
 		const { subscribe } = await import('@parcel/watcher');
 
-		const { Push } = await import('@/push');
+		const { Push } = await import('@/push/index.js');
 		const push = Container.get(Push);
 
 		for (const loader of Object.values(this.loaders)) {

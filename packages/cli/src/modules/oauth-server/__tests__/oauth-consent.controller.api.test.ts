@@ -5,6 +5,7 @@ import { Container } from '@n8n/di';
 
 import { JwtService } from '@/services/jwt.service';
 import { ProtectedResourceRegistry } from '@/services/protected-resource.registry';
+import { UrlService } from '@/services/url.service';
 import { createOwner, createMember } from '@test-integration/db/users';
 import { setupTestServer } from '@test-integration/utils';
 
@@ -64,6 +65,9 @@ describe('GET /rest/consent/details', () => {
 			clientId: 'test-client-id',
 			redirectUri: 'https://example.com/callback',
 			scopes: [...MCP_INSTANCE_SCOPES],
+			scopeTools: expect.objectContaining({
+				'workflow:read': expect.arrayContaining(['search_workflows']),
+			}),
 		});
 	});
 
@@ -282,6 +286,9 @@ describe('POST /rest/consent/approve', () => {
 		expect(redirectUrl.searchParams.get('code')).toBeTruthy();
 		expect(redirectUrl.searchParams.get('code')?.length).toBeGreaterThan(32);
 		expect(redirectUrl.searchParams.get('state')).toBe('test-state');
+		expect(redirectUrl.searchParams.get('iss')).toBe(
+			Container.get(UrlService).getInstanceBaseUrl(),
+		);
 	});
 
 	test('should handle consent denial and return error redirect URL', async () => {
@@ -301,6 +308,9 @@ describe('POST /rest/consent/approve', () => {
 		expect(redirectUrl.searchParams.get('error')).toBe('access_denied');
 		expect(redirectUrl.searchParams.get('error_description')).toBeTruthy();
 		expect(redirectUrl.searchParams.get('state')).toBe('test-state');
+		expect(redirectUrl.searchParams.get('iss')).toBe(
+			Container.get(UrlService).getInstanceBaseUrl(),
+		);
 	});
 
 	test('should clear session cookie after processing consent', async () => {
@@ -405,7 +415,7 @@ describe('POST /rest/consent/approve', () => {
 		expect(response.statusCode).toBe(200);
 
 		const { UserConsentRepository } = await import(
-			'../database/repositories/oauth-user-consent.repository'
+			'../database/repositories/oauth-user-consent.repository.js'
 		);
 		const userConsentRepository = Container.get(UserConsentRepository);
 		const consent = await userConsentRepository.findOne({
@@ -428,7 +438,7 @@ describe('POST /rest/consent/approve', () => {
 		expect(response.statusCode).toBe(200);
 
 		const { UserConsentRepository } = await import(
-			'../database/repositories/oauth-user-consent.repository'
+			'../database/repositories/oauth-user-consent.repository.js'
 		);
 		const userConsentRepository = Container.get(UserConsentRepository);
 		const consent = await userConsentRepository.findOne({

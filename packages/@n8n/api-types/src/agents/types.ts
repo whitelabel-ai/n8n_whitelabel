@@ -3,7 +3,6 @@ import {
 	EXECUTE_WORKFLOW_TRIGGER_NODE_TYPE,
 	FORM_TRIGGER_NODE_TYPE,
 	MANUAL_TRIGGER_NODE_TYPE,
-	SCHEDULE_TRIGGER_NODE_TYPE,
 	WEBHOOK_NODE_TYPE,
 } from 'n8n-workflow';
 import { z } from 'zod';
@@ -15,7 +14,6 @@ export const SUPPORTED_WORKFLOW_TOOL_TRIGGERS = [
 	MANUAL_TRIGGER_NODE_TYPE,
 	EXECUTE_WORKFLOW_TRIGGER_NODE_TYPE,
 	CHAT_TRIGGER_NODE_TYPE,
-	SCHEDULE_TRIGGER_NODE_TYPE,
 	FORM_TRIGGER_NODE_TYPE,
 	WEBHOOK_NODE_TYPE,
 ] as const;
@@ -193,7 +191,7 @@ export interface AgentCapabilitySummary {
 }
 
 export interface AgentPersistedMessageContentPart {
-	type: 'text' | 'reasoning' | 'tool-call' | (string & {});
+	type: 'text' | 'reasoning' | 'tool-call' | 'file' | (string & {});
 	text?: string;
 	toolName?: string;
 	toolCallId?: string;
@@ -202,16 +200,25 @@ export interface AgentPersistedMessageContentPart {
 	output?: unknown;
 	canceled?: boolean;
 	error?: string;
-	/** Epoch ms when the tool handler started executing. */
+	/** Epoch ms when this content part started. */
 	startTime?: number;
-	/** Epoch ms when the tool handler settled. */
+	/** Epoch ms when this content part settled. */
 	endTime?: number;
+	/** File parts carry attachment metadata only — bytes are fetched via the attachment download route. */
+	fileId?: string;
+	fileName?: string;
+	mimeType?: string;
+	sizeBytes?: number;
 }
 
 export interface AgentPersistedMessageDto {
 	id: string;
 	role: 'user' | 'assistant' | (string & {});
 	content: AgentPersistedMessageContentPart[];
+	/** Agent-execution turn id when this message was produced from an execution transcript. */
+	executionId?: string;
+	/** Outcome of the execution that produced this message. */
+	executionStatus?: 'success' | 'error';
 }
 
 export const AGENT_BUILDER_DEFAULT_MODEL = 'claude-sonnet-4-6' as const;

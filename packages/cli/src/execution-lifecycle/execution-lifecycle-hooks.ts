@@ -280,6 +280,15 @@ function hookFunctionsPush(
 		return resolvedUser;
 	}
 
+	// Monotonic counter over this execution segment's node-event pushes so the UI
+	// can order events that arrive late or out of order (e.g. after a suspended
+	// background tab resumes) and render only the latest node as executing
+	// (CAT-2895). Assigned in engine order here on the instance running the
+	// workflow; it rides the worker→main pubsub relay unchanged. Scoped to a
+	// segment: this closure is per run, so a waiting-execution (Wait/Form node)
+	// resume rebuilds the hooks and restarts the counter at 0.
+	let nodeEventSequence = 0;
+
 	hooks.addHandler('nodeExecuteBefore', function (nodeName, data) {
 		const { executionId } = this;
 		// Push data to session which started workflow before each
@@ -291,7 +300,10 @@ function hookFunctionsPush(
 		});
 
 		pushInstance.send(
-			{ type: 'nodeExecuteBefore', data: { executionId, nodeName, data } },
+			{
+				type: 'nodeExecuteBefore',
+				data: { executionId, nodeName, sequenceNumber: nodeEventSequence++, data },
+			},
 			pushRef,
 		);
 	});
@@ -310,7 +322,13 @@ function hookFunctionsPush(
 		pushInstance.send(
 			{
 				type: 'nodeExecuteAfter',
-				data: { executionId, nodeName, itemCountByConnectionType, data: taskData },
+				data: {
+					executionId,
+					nodeName,
+					sequenceNumber: nodeEventSequence++,
+					itemCountByConnectionType,
+					data: taskData,
+				},
 			},
 			pushRef,
 		);
@@ -459,6 +477,7 @@ function hookFunctionsExternalHooks(hooks: ExecutionLifecycleHooks) {
 			fullRunData,
 			this.workflowData,
 			this.executionId,
+			workflowContext,
 		]);
 	});
 }
@@ -643,12 +662,14 @@ function hookFunctionsSave(
 	});
 }
 
+/**
+ * Modes whose run data may be skipped when main is certain to discard it.
+ */
 const DISCARDABLE_DATA_MODES: WorkflowExecuteMode[] = ['trigger', 'cli', 'error', 'internal'];
 
 /**
  * Returns hook functions to save workflow execution and call error workflow
- * for running with queues. Manual executions should never run on queues as
- * they are always executed in the main process.
+ * for running with queues.
  */
 function hookFunctionsSaveWorker(
 	hooks: ExecutionLifecycleHooks,
@@ -705,7 +726,6 @@ function hookFunctionsSaveWorker(
 				runDataAttemptedDynamicCredentials(resultRunData);
 
 			const mainWillDiscardData =
-				process.env.N8N_SKIP_UNSAVED_EXECUTION_DATA_WRITES === 'true' &&
 				fullRunData.status === 'success' &&
 				!saveSettings.success &&
 				!fullRunData.waitTill &&

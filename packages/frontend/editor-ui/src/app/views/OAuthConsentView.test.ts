@@ -155,7 +155,7 @@ describe('OAuthConsentView', () => {
 		expect(window.location.href).toBe(redirectUrl);
 	});
 
-	it('should disable allow button until redirect URL is trusted', async () => {
+	it('should disable the allow button until the redirect URL is acknowledged', async () => {
 		const { getByTestId, getByLabelText } = renderComponent();
 		await waitAllPromises();
 
@@ -165,6 +165,16 @@ describe('OAuthConsentView', () => {
 		await userEvent.click(getByLabelText('I recognize and trust this URL'));
 
 		expect(allowButton).not.toBeDisabled();
+	});
+
+	it('should show the redirect URL inside the warning callout', async () => {
+		const { getByTestId } = renderComponent();
+		await waitAllPromises();
+
+		expect(getByTestId('consent-redirect-warning')).toBeVisible();
+		expect(getByTestId('consent-redirect-uri')).toHaveTextContent(
+			'https://legitimate-client.com/callback',
+		);
 	});
 
 	describe('scope selection', () => {
@@ -188,7 +198,6 @@ describe('OAuthConsentView', () => {
 			await waitAllPromises();
 
 			expect(getByTestId('consent-scopes')).toBeVisible();
-			expect(getByTestId('consent-scopes-note')).toBeVisible();
 			expect(queryByText('Get a list of your workflows')).toBeNull();
 		});
 
@@ -231,6 +240,41 @@ describe('OAuthConsentView', () => {
 				'workflow:write',
 				'execution:read',
 			]);
+		});
+
+		it('should show a tool count pill per scope group when scope tools are provided', async () => {
+			const detailsWithTools = {
+				...scopedDetails,
+				scopeTools: {
+					'workflow:read': ['search_workflows', 'get_workflow_details'],
+					'workflow:write': ['update_workflow', 'search_workflows'],
+					'execution:read': ['get_workflow_execution'],
+				},
+			};
+			consentStore.consentDetails = detailsWithTools;
+			consentStore.fetchConsentDetails.mockImplementation(async () => {
+				consentStore.consentDetails = detailsWithTools;
+				return detailsWithTools;
+			});
+
+			const { getByTestId } = renderComponent();
+			await waitAllPromises();
+
+			await userEvent.click(getByTestId('scopes-tree-toggle'));
+
+			// workflows group tools are deduplicated across its scopes
+			expect(getByTestId('scope-group-tools-workflows')).toHaveTextContent('3 tools');
+			// a single tool uses the singular form (not "1 tools")
+			expect(getByTestId('scope-group-tools-executions')).toHaveTextContent(/1 tool\b/);
+		});
+
+		it('should not render tool pills when scope tools are absent', async () => {
+			const { getByTestId, queryByTestId } = renderComponent();
+			await waitAllPromises();
+
+			await userEvent.click(getByTestId('scopes-tree-toggle'));
+
+			expect(queryByTestId('scope-group-tools-workflows')).not.toBeInTheDocument();
 		});
 
 		it('should disable Allow when no scopes are selected', async () => {

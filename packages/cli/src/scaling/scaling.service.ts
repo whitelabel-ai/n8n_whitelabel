@@ -6,8 +6,9 @@ import { OnLeaderStepdown, OnLeaderTakeover, OnShutdown } from '@n8n/decorators'
 import { Container, Service } from '@n8n/di';
 import { ErrorReporter, InstanceSettings } from 'n8n-core';
 import { ensureError } from '@n8n/utils/errors/ensure-error';
-import { BINARY_ENCODING, sleep, jsonStringify, UnexpectedError } from 'n8n-workflow';
-import type { IExecuteResponsePromiseData, IRun } from 'n8n-workflow';
+import { sleep } from '@n8n/utils/sleep';
+import { jsonStringify, UnexpectedError } from 'n8n-workflow';
+import type { IRun } from 'n8n-workflow';
 import assert, { strict } from 'node:assert';
 
 import { ActiveExecutions } from '@/active-executions';
@@ -30,6 +31,7 @@ import type {
 	JobMessage,
 	JobFailedMessage,
 } from './scaling.types';
+import { decodeRelayedWebhookResponse } from './webhook-response-relay';
 
 @Service()
 export class ScalingService {
@@ -55,7 +57,7 @@ export class ScalingService {
 
 	async setupQueue() {
 		const { default: BullQueue } = await import('bull');
-		const { RedisClientService } = await import('@/services/redis-client.service');
+		const { RedisClientService } = await import('@/services/redis-client.service.js');
 
 		if (this.queue) return;
 
@@ -79,7 +81,7 @@ export class ScalingService {
 		const { McpServer, QueuedExecutionStrategy, RedisSessionStore } = await import(
 			'@n8n/n8n-nodes-langchain/mcp/core'
 		);
-		const { Publisher } = await import('@/scaling/pubsub/publisher.service');
+		const { Publisher } = await import('@/scaling/pubsub/publisher.service.js');
 
 		const publisher = Container.get(Publisher);
 
@@ -351,10 +353,11 @@ export class ScalingService {
 				case 'send-chunk':
 					this.activeExecutions.sendChunk(msg.executionId, msg.chunkText);
 					break;
-				case 'respond-to-webhook':
-					const decodedResponse = this.decodeWebhookResponse(msg.response);
+				case 'respond-to-webhook': {
+					const decodedResponse = decodeRelayedWebhookResponse(msg.response);
 					this.activeExecutions.resolveResponsePromise(msg.executionId, decodedResponse);
 					break;
+				}
 				case 'job-finished':
 					if (msg.success) {
 						this.activeExecutions.resolveResponsePromise(msg.executionId, {});
@@ -382,6 +385,10 @@ export class ScalingService {
 							metadata: msg.metadata,
 							startedAt: new Date(msg.startedAt),
 							stoppedAt: new Date(msg.stoppedAt),
+							// Dropping `waitTill` here makes main mistake a waiting execution
+							// for a finished one and delete it when the workflow does not
+							// save successful executions
+							waitTill: msg.waitTill ? new Date(msg.waitTill) : null,
 						});
 					}
 
@@ -471,7 +478,7 @@ export class ScalingService {
 					storedAt: executionData.storedAt,
 				};
 
-				const { McpService } = await import('@/modules/mcp/mcp.service');
+				const { McpService } = await import('@/modules/mcp/mcp.service.js');
 				const mcpService = Container.get(McpService);
 				mcpService.handleWorkerResponse(executionId, runData);
 			} else {
@@ -489,22 +496,6 @@ export class ScalingService {
 	}
 
 	// #endregion
-
-	private decodeWebhookResponse(
-		response: IExecuteResponsePromiseData,
-	): IExecuteResponsePromiseData {
-		if (
-			typeof response === 'object' &&
-			typeof response.body === 'object' &&
-			response.body !== null &&
-			'__@N8nEncodedBuffer@__' in response.body &&
-			typeof response.body['__@N8nEncodedBuffer@__'] === 'string'
-		) {
-			response.body = Buffer.from(response.body['__@N8nEncodedBuffer@__'], BINARY_ENCODING);
-		}
-
-		return response;
-	}
 
 	private assertQueue() {
 		if (this.queue) return;

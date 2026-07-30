@@ -7,7 +7,10 @@ export type {
 	ContentCitation,
 	ContentText,
 	ContentReasoning,
+	ContentReasoningFile,
 	ContentFile,
+	ContentFileRef,
+	ContentCustom,
 	ContentToolCall,
 	ContentInvalidToolCall,
 	ContentProvider,
@@ -18,6 +21,10 @@ export type {
 	AgentDbMessage,
 } from './sdk/message';
 
+export { stripHydratedFileData } from './sdk/message';
+
+export type { BuiltFileStore } from './sdk/file-store';
+
 export type {
 	Provider,
 	AnthropicThinkingConfig,
@@ -27,6 +34,7 @@ export type {
 	ThinkingConfigFor,
 	ThinkingConfig,
 } from './sdk/provider';
+export type { ReasoningLevel } from './sdk/reasoning';
 
 export type {
 	AgentResult,
@@ -123,6 +131,7 @@ export type {
 	ObservationLogEntry,
 	ObservationLogMarker,
 	ObservationLogMerge,
+	MemoryTaskUsageReport,
 	ObservationLogObserveFn,
 	ObservationLogObserverInput,
 	ObservationLogReadOptions,
@@ -175,7 +184,12 @@ export type {
 	AgentMiddleware,
 } from './runtime/event';
 
-export type { McpServerConfig, McpToolCallSettledEvent, McpVerifyResult } from './sdk/mcp';
+export type {
+	McpConnectionFailedEvent,
+	McpServerConfig,
+	McpToolCallSettledEvent,
+	McpVerifyResult,
+} from './sdk/mcp';
 
 export type { AgentBuilder } from './sdk/agent-builder';
 

@@ -437,6 +437,33 @@ describe('createDelegateSubAgentTool', () => {
 		expect(runSubAgent.mock.calls[0]?.[0]).not.toHaveProperty('parentResourceId');
 		expect(runSubAgent.mock.calls[0]?.[0]).not.toHaveProperty('parentAbortSignal');
 		expect(runSubAgent.mock.calls[0]?.[0]).not.toHaveProperty('parentExecutionCounter');
+		expect(runSubAgent.mock.calls[0]?.[0]).not.toHaveProperty('parentTelemetry');
+	});
+
+	it('forwards the parent telemetry from the tool context to the runner callback', async () => {
+		const runSubAgent = vi
+			.fn<DelegateSubAgentRunner>()
+			.mockResolvedValue({ status: 'completed', taskPath: '/root/research_api', answer: 'done' });
+		const tool = createDelegateSubAgentTool({ runSubAgent });
+		const parentTelemetry = {
+			enabled: true,
+			recordInputs: true,
+			recordOutputs: true,
+			integrations: [],
+			functionId: 'parent-agent',
+		};
+
+		await tool.handler?.(input, {
+			runId: 'parent-run-1',
+			parentTelemetry,
+		});
+
+		expect(runSubAgent).toHaveBeenCalledWith(
+			expect.objectContaining({ parentTelemetry }),
+			expect.objectContaining({
+				runInlineSubAgent: expect.any(Function),
+			}),
+		);
 	});
 
 	it('forwards the parent run abort signal to the runner callback', async () => {
@@ -618,6 +645,47 @@ describe('createDelegateSubAgentTool', () => {
 		});
 	});
 
+	it('rethrows an abort instead of reporting the delegation as failed', async () => {
+		const events: AgentEventData[] = [];
+		const abortError = new Error('This operation was aborted');
+		abortError.name = 'AbortError';
+		const controller = new AbortController();
+		controller.abort();
+		const tool = createDelegateSubAgentTool({
+			runSubAgent: async () => await Promise.reject(abortError),
+		});
+
+		await expect(
+			tool.handler?.(input, {
+				runId: 'parent-run-1',
+				abortSignal: controller.signal,
+				emitEvent: (event) => events.push(event),
+			}),
+		).rejects.toBe(abortError);
+		expect(events[events.length - 1]).toMatchObject({
+			type: AgentEvent.SubAgentCompleted,
+			status: 'cancelled',
+		});
+	});
+
+	it('reports an abort-shaped child error as failed while the parent signal is live', async () => {
+		const abortError = new Error('This operation was aborted');
+		abortError.name = 'AbortError';
+		const tool = createDelegateSubAgentTool({
+			runSubAgent: async () => await Promise.reject(abortError),
+		});
+
+		await expect(
+			tool.handler?.(input, {
+				runId: 'parent-run-1',
+				abortSignal: new AbortController().signal,
+			}),
+		).resolves.toMatchObject({
+			status: 'failed',
+			error: 'This operation was aborted',
+		});
+	});
+
 	it('returns a failed output for invalid task names', async () => {
 		const runSubAgent = vi.fn();
 		const tool = createDelegateSubAgentTool({ runSubAgent });
@@ -728,6 +796,24 @@ describe('generateResultToDelegateSubAgentOutput', () => {
 		});
 	});
 
+	it('maps a cancelled child run to cancelled, even though it also reports an error', () => {
+		const result: GenerateResult = {
+			runId: 'child-run-5',
+			messages: [],
+			finishReason: 'error',
+			error: new Error('Aborted'),
+			getState: () => ({
+				status: 'cancelled',
+				messageList: { messages: [], historyIds: [], inputIds: [], responseIds: [] },
+				pendingToolCalls: {},
+			}),
+		};
+
+		expect(generateResultToDelegateSubAgentOutput('/root/x_0', result)).toMatchObject({
+			status: 'cancelled',
+		});
+	});
+
 	it('returns a failed delegate output for delegated child suspension stopgap', async () => {
 		const { failedDelegatedChildSuspendOutput } = await import(
 			'../tools/delegate-sub-agent-tool.js'
@@ -798,9 +884,11 @@ describe('generateResultToDelegateSubAgentOutput', () => {
 					suspendPayload: {},
 				},
 			],
-			getState: () => {
-				throw new Error('getState is not implemented');
-			},
+			getState: () => ({
+				status: 'failed',
+				messageList: { messages: [], historyIds: [], inputIds: [], responseIds: [] },
+				pendingToolCalls: {},
+			}),
 		};
 
 		expect(generateResultToDelegateSubAgentOutput('/root/x_0', result)).toMatchObject({
