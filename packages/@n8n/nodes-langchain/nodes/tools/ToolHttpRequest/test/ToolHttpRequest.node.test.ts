@@ -23,6 +23,18 @@ describe('ToolHttpRequest', () => {
 		executeFunctions.addInputData.mockReturnValue({ index: 0 });
 	});
 
+	describe('Deprecation', () => {
+		it('stays hidden and names the node that replaces it', () => {
+			// The node still runs, but a builder that reads the description must
+			// find the supported node. The type-definition header carries the
+			// searchHint through to the builder.
+			expect(httpTool.description.hidden).toBe(true);
+			expect(httpTool.description.builderHint?.searchHint).toContain(
+				'n8n-nodes-base.httpRequestTool',
+			);
+		});
+	});
+
 	describe('Binary response', () => {
 		it('should return the error when receiving a binary response', async () => {
 			helpers.httpRequest.mockResolvedValue({
@@ -53,6 +65,10 @@ describe('ToolHttpRequest', () => {
 			expect(helpers.httpRequest).toHaveBeenCalled();
 			expect(res).toContain('error');
 			expect(res).toContain('Binary data is not supported');
+			expect(executeFunctions.logAiEvent).toHaveBeenCalledWith(
+				'ai-tool-called',
+				expect.stringContaining('Binary data is not supported'),
+			);
 		});
 
 		it('should return the response text when receiving a text response', async () => {
@@ -83,6 +99,42 @@ describe('ToolHttpRequest', () => {
 			const res = await (response as N8nTool).invoke({});
 			expect(helpers.httpRequest).toHaveBeenCalled();
 			expect(res).toEqual('Hello World');
+			expect(executeFunctions.logAiEvent).toHaveBeenCalledWith(
+				'ai-tool-called',
+				JSON.stringify({ query: '{}', response: 'Hello World' }),
+			);
+		});
+
+		it('should sanitize credential-shaped values in the tool-called event', async () => {
+			helpers.httpRequest.mockResolvedValue({
+				body: 'api_key: sk-live-abcdef123456',
+				headers: {
+					'content-type': 'text/plain',
+				},
+			});
+
+			executeFunctions.getNodeParameter.mockImplementation((paramName: string) => {
+				switch (paramName) {
+					case 'method':
+						return 'GET';
+					case 'url':
+						return 'https://httpbin.org/text/plain';
+					case 'options':
+						return {};
+					case 'placeholderDefinitions.values':
+						return [];
+					default:
+						return undefined;
+				}
+			});
+
+			const { response } = await httpTool.supplyData.call(executeFunctions, 0);
+
+			const res = await (response as N8nTool).invoke({});
+			expect(res).toBe('api_key: sk-live-abcdef123456');
+			const payload = executeFunctions.logAiEvent.mock.calls[0][1];
+			expect(payload).toContain('api_key: [REDACTED]');
+			expect(payload).not.toContain('sk-live-abcdef123456');
 		});
 
 		it('should return the response text when receiving a text response with a charset', async () => {
@@ -235,6 +287,45 @@ describe('ToolHttpRequest', () => {
 						password: 'password',
 					}),
 				}),
+			);
+		});
+
+		it('should apply Simplified Custom Auth through credential authentication', async () => {
+			helpers.httpRequestWithAuthentication.mockResolvedValue({
+				body: 'Hello World',
+				headers: { 'content-type': 'text/plain' },
+			});
+
+			executeFunctions.getNodeParameter.mockImplementation((paramName: string) => {
+				switch (paramName) {
+					case 'method':
+						return 'GET';
+					case 'url':
+						return 'https://api.example.com/data';
+					case 'authentication':
+						return 'genericCredentialType';
+					case 'genericAuthType':
+						return 'httpTemplatedCustomAuth';
+					case 'options':
+						return {};
+					case 'placeholderDefinitions.values':
+						return [];
+					default:
+						return undefined;
+				}
+			});
+			executeFunctions.getCredentials.mockResolvedValue({
+				template: JSON.stringify({ headers: { Authorization: 'Bearer {{api_key}}' } }),
+				placeholderValues: JSON.stringify({ api_key: 'secret' }),
+			});
+
+			const { response } = await httpTool.supplyData.call(executeFunctions, 0);
+			const result = await (response as N8nTool).invoke({});
+
+			expect(result).toBe('Hello World');
+			expect(helpers.httpRequestWithAuthentication).toHaveBeenCalledWith(
+				'httpTemplatedCustomAuth',
+				expect.objectContaining({ url: 'https://api.example.com/data' }),
 			);
 		});
 

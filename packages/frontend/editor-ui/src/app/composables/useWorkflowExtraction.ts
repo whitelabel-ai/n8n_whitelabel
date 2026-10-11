@@ -14,7 +14,7 @@ import type {
 	INode,
 	IWorkflowGroup,
 } from 'n8n-workflow';
-import { useToast } from './useToast';
+import { useToast } from '@n8n/composables/useToast';
 import { useRouter } from 'vue-router';
 import { VIEWS, WORKFLOW_EXTRACTION_NAME_MODAL_KEY } from '@/app/constants';
 import { useHistoryStore } from '@/app/stores/history.store';
@@ -54,7 +54,8 @@ export function useWorkflowExtraction() {
 	const i18n = useI18n();
 	const telemetry = useTelemetry();
 	const groupTelemetry = useCanvasNodeGroupTelemetry();
-	const { expandSelectionWithSubNodes, isSelectionExtractable } = useSelectionValidation();
+	const { expandSelectionWithSubNodes, isSelectionExtractable, isSubworkflowConversionDisabled } =
+		useSelectionValidation();
 
 	function showError(message: string) {
 		toast.showMessage({
@@ -127,7 +128,7 @@ export function useWorkflowExtraction() {
 				options: {},
 			},
 			type: EXECUTE_WORKFLOW_NODE_TYPE,
-			typeVersion: 1.2,
+			typeVersion: 1.4,
 			position,
 			name,
 		};
@@ -689,7 +690,7 @@ export function useWorkflowExtraction() {
 	 * @param nodeIds the ids to be extracted from the current workflow into a sub-workflow
 	 */
 	function extractWorkflow(nodeIds: string[]) {
-		if (nodeIds.length === 0) return;
+		if (nodeIds.length === 0 || isSubworkflowConversionDisabled()) return;
 
 		const success = tryExtractNodesIntoSubworkflow(nodeIds);
 		trackStartExtractWorkflow(nodeIds.length, success);

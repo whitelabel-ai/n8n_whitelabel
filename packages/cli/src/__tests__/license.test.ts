@@ -1,6 +1,7 @@
 import type { Logger } from '@n8n/backend-common';
-import { mockLogger } from '@n8n/backend-test-utils';
+import { mockInstance, mockLogger } from '@n8n/backend-test-utils';
 import type { GlobalConfig } from '@n8n/config';
+import { LICENSE_FEATURES } from '@n8n/constants';
 import type { SettingsRepository } from '@n8n/db';
 import { LicenseManager } from '@n8n_io/license-sdk';
 import type { InstanceSettings } from 'n8n-core';
@@ -54,6 +55,7 @@ describe('License', () => {
 			expect.objectContaining({
 				autoRenewEnabled: true,
 				autoRenewOffset: MOCK_RENEW_OFFSET,
+				autoRenewTimer: false,
 				offlineMode: false,
 				renewOnInit: true,
 				deviceFingerprint: expect.any(Function),
@@ -83,8 +85,9 @@ describe('License', () => {
 		await license.init();
 		expect(LicenseManager).toHaveBeenCalledWith(
 			expect.objectContaining({
-				autoRenewEnabled: false,
+				autoRenewEnabled: true,
 				autoRenewOffset: MOCK_RENEW_OFFSET,
+				autoRenewTimer: false,
 				offlineMode: true,
 				renewOnInit: false,
 				deviceFingerprint: expect.any(Function),
@@ -99,6 +102,34 @@ describe('License', () => {
 				tenantId: 1,
 			}),
 		);
+	});
+
+	test('passes detachFloatingOnShutdown from config in single-main', async () => {
+		license = new License(
+			mockLogger(),
+			mock<InstanceSettings>({ instanceType: 'main', isLeader: true, isMultiMain: false }),
+			mock(),
+			mock(),
+			mock<GlobalConfig>({ license: licenseConfig }),
+		);
+		await license.init();
+
+		const calls = (LicenseManager as MockedClass<typeof LicenseManager>).mock.calls;
+		expect(calls[calls.length - 1][0].detachFloatingOnShutdown).toBe(true);
+	});
+
+	test('does not detach floating entitlements on shutdown in multi-main', async () => {
+		license = new License(
+			mockLogger(),
+			mock<InstanceSettings>({ instanceType: 'main', isLeader: true, isMultiMain: true }),
+			mock(),
+			mock(),
+			mock<GlobalConfig>({ license: licenseConfig }),
+		);
+		await license.init();
+
+		const calls = (LicenseManager as MockedClass<typeof LicenseManager>).mock.calls;
+		expect(calls[calls.length - 1][0].detachFloatingOnShutdown).toBe(false);
 	});
 
 	test('attempts to activate license with provided key (initial activation)', async () => {
@@ -127,16 +158,25 @@ describe('License', () => {
 		expect(LicenseManager.prototype.renew).toHaveBeenCalled();
 	});
 
-	test('check if feature is enabled', () => {
-		license.isLicensed(MOCK_FEATURE_FLAG);
+	test('runs one auto-renewal pass through the SDK', async () => {
+		await license.renewIfDue();
 
-		expect(LicenseManager.prototype.hasFeatureEnabled).toHaveBeenCalledWith(MOCK_FEATURE_FLAG);
+		expect(LicenseManager.prototype.renewIfDue).toHaveBeenCalledTimes(1);
 	});
 
-	test('check if sharing feature is enabled', () => {
-		license.isLicensed(MOCK_FEATURE_FLAG);
+	// Whitelabel build: every positive feature is enabled without asking the license SDK.
+	test('enables positive features without the license SDK', () => {
+		expect(license.isLicensed(MOCK_FEATURE_FLAG)).toBe(true);
+		expect(LicenseManager.prototype.hasFeatureEnabled).not.toHaveBeenCalled();
+	});
 
-		expect(LicenseManager.prototype.hasFeatureEnabled).toHaveBeenCalledWith(MOCK_FEATURE_FLAG);
+	test.each([
+		LICENSE_FEATURES.API_DISABLED,
+		LICENSE_FEATURES.SHOW_NON_PROD_BANNER,
+		LICENSE_FEATURES.AI_GATEWAY_CLOUD_UBB,
+		LICENSE_FEATURES.AI_ASSISTANT_CLOUD_UBB_ENTITLEMENT,
+	])('keeps %s disabled', (feature) => {
+		expect(license.isLicensed(feature)).toBe(false);
 	});
 
 	test('check fetching entitlements', () => {
@@ -285,6 +325,85 @@ describe('License', () => {
 				expect(onExpirySoon).toBeUndefined();
 				expect(reloadSpy).not.toHaveBeenCalled();
 			}
+		});
+	});
+
+	describe('reload-license broadcast', () => {
+		const lastManagerConfig = () => {
+			const { calls } = (LicenseManager as MockedClass<typeof LicenseManager>).mock;
+			return calls[calls.length - 1][0];
+		};
+
+		it.each([
+			{ hook: 'onLicenseRenewed', isLeader: false, mode: 'queue', publishes: true },
+			{ hook: 'onLicenseRenewed', isLeader: true, mode: 'queue', publishes: true },
+			{ hook: 'onLicenseRenewed', isLeader: false, mode: 'regular', publishes: false },
+			{ hook: 'onFeatureChange', isLeader: true, mode: 'queue', publishes: true },
+			{ hook: 'onFeatureChange', isLeader: false, mode: 'queue', publishes: false },
+		] as const)(
+			'$hook on a main with isLeader=$isLeader in $mode mode publishes=$publishes',
+			async ({ hook, isLeader, mode, publishes }) => {
+				const { Publisher } = await import('@/scaling/pubsub/publisher.service.js');
+				const publisher = mockInstance(Publisher, { publishCommand: vi.fn() });
+				license = new License(
+					mockLogger(),
+					mock<InstanceSettings>({ instanceType: 'main', isLeader }),
+					mock(),
+					mock(),
+					mock<GlobalConfig>({ license: licenseConfig, executions: { mode } }),
+				);
+				await license.init();
+
+				await lastManagerConfig()[hook]!({});
+				await new Promise(setImmediate);
+
+				if (publishes) {
+					expect(publisher.publishCommand).toHaveBeenCalledWith({ command: 'reload-license' });
+				} else {
+					expect(publisher.publishCommand).not.toHaveBeenCalled();
+				}
+			},
+		);
+	});
+
+	describe('reload', () => {
+		const lastManager = () => {
+			const { instances } = (LicenseManager as MockedClass<typeof LicenseManager>).mock;
+			return instances[instances.length - 1];
+		};
+
+		it('loads the stored cert and never starts the manager over', async () => {
+			const callback = vi.fn();
+			license.onCertRefresh(callback);
+
+			await license.reload();
+
+			expect(lastManager().reloadStoredCert).toHaveBeenCalledTimes(1);
+			expect(lastManager().reload).not.toHaveBeenCalled();
+			expect(callback).toHaveBeenCalledTimes(1);
+		});
+
+		it('warns and skips the refresh callbacks when the stored cert cannot be read', async () => {
+			const logger = mock<Logger>();
+			logger.scoped.mockReturnValue(logger);
+			license = new License(
+				logger,
+				instanceSettings,
+				mock(),
+				mock(),
+				mock<GlobalConfig>({ license: licenseConfig, multiMainSetup: { enabled: false } }),
+			);
+			await license.init();
+			vi.mocked(lastManager().reloadStoredCert).mockRejectedValueOnce(new Error('db down'));
+			const callback = vi.fn();
+			license.onCertRefresh(callback);
+
+			await expect(license.reload()).resolves.toBeUndefined();
+
+			expect(logger.warn).toHaveBeenCalledWith('Failed to reload the stored license cert', {
+				error: 'db down',
+			});
+			expect(callback).not.toHaveBeenCalled();
 		});
 	});
 
@@ -462,26 +581,29 @@ describe('License', () => {
 				isLeader: false,
 				autoRenewalEnabled: false,
 			},
-		])('$scenario, should disable renewal', async ({ isLeader, autoRenewalEnabled }) => {
-			const globalConfig = mock<GlobalConfig>({
-				license: { ...licenseConfig, autoRenewalEnabled },
-			});
+		])(
+			'$scenario, should renew on init only as leader with auto-renewal on',
+			async ({ isLeader, autoRenewalEnabled }) => {
+				const globalConfig = mock<GlobalConfig>({
+					license: { ...licenseConfig, autoRenewalEnabled },
+				});
 
-			await new License(
-				mockLogger(),
-				mock<InstanceSettings>({ instanceType: 'main', isLeader }),
-				mock(),
-				mock(),
-				globalConfig,
-			).init();
+				await new License(
+					mockLogger(),
+					mock<InstanceSettings>({ instanceType: 'main', isLeader }),
+					mock(),
+					mock(),
+					globalConfig,
+				).init();
 
-			const expectedRenewalSettings =
-				isLeader && autoRenewalEnabled
-					? { autoRenewEnabled: true, renewOnInit: true }
-					: { autoRenewEnabled: false, renewOnInit: false };
-
-			expect(LicenseManager).toHaveBeenCalledWith(expect.objectContaining(expectedRenewalSettings));
-		});
+				expect(LicenseManager).toHaveBeenCalledWith(
+					expect.objectContaining({
+						autoRenewEnabled: autoRenewalEnabled,
+						renewOnInit: isLeader && autoRenewalEnabled,
+					}),
+				);
+			},
+		);
 
 		it('when CLI command with N8N_LICENSE_AUTO_RENEW_ENABLED=true, should enable renewal', async () => {
 			const globalConfig = mock<GlobalConfig>({

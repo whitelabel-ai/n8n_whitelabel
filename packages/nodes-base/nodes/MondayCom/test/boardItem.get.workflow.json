@@ -1,0 +1,111 @@
+{
+	"name": "MondayCom boardItem get test",
+	"nodes": [
+		{
+			"parameters": {},
+			"id": "trigger-id",
+			"name": "When clicking \"Execute Workflow\"",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [0, 0]
+		},
+		{
+			"parameters": {
+				"authentication": "oAuth2",
+				"resource": "boardItem",
+				"operation": "get",
+				"itemId": "123"
+			},
+			"id": "monday-node-id",
+			"name": "Monday get",
+			"type": "n8n-nodes-base.mondayCom",
+			"typeVersion": 1,
+			"position": [220, 0],
+			"credentials": {
+				"mondayComOAuth2Api": {
+					"id": "credential-id",
+					"name": "Test Credentials"
+				}
+			}
+		},
+		{
+			"parameters": {},
+			"id": "noop-id",
+			"name": "Result",
+			"type": "n8n-nodes-base.noOp",
+			"typeVersion": 1,
+			"position": [440, 0]
+		}
+	],
+	"pinData": {
+		"Result": [
+			{
+				"json": {
+					"id": "123",
+					"name": "Item Name",
+					"email": "item@test.com",
+					"created_at": "2025-01-01T00:00:00Z",
+					"updated_at": "2025-01-02T00:00:00Z",
+					"state": "active",
+					"board": { "id": "999" },
+					"creator_id": "1",
+					"group": { "id": "group1", "title": "Group", "deleted": false, "archived": false },
+					"column_values": [
+						{
+							"id": "link",
+							"value": "\"10\"",
+							"text": "10",
+							"display_value": "Linked Name",
+							"title": "Link Col",
+							"additional_info": "{\"relation_column\":{\"link\":true},\"displayed_linked_columns\":{\"999\":[\"price\"]}}",
+							"linked_item_ids": ["42"]
+						}
+					],
+					"mappable_column_values": {
+						"link": {
+							"linkedPulseIds": [{ "linkedPulseId": "42" }],
+							"linked_item_ids": ["42"],
+							"display_value": "Linked Name",
+							"text": "Linked Name"
+						}
+					},
+					"assets": [],
+					"parent_item": {
+						"id": "P1",
+						"name": "Parent",
+						"created_at": "2024-12-31T00:00:00Z",
+						"updated_at": "2025-01-01T00:00:00Z",
+						"state": "active",
+						"board": { "id": "999" },
+						"creator_id": "1",
+						"group": { "id": "group1" },
+						"column_values": [
+							{
+								"id": "parent_col",
+								"value": "\"val\"",
+								"text": "Parent Text",
+								"title": "Parent Col",
+								"additional_info": "{}"
+							}
+						]
+					},
+					"subitems": []
+				}
+			}
+		]
+	},
+	"connections": {
+		"When clicking \"Execute Workflow\"": {
+			"main": [[{ "node": "Monday get", "type": "main", "index": 0 }]]
+		},
+		"Monday get": {
+			"main": [[{ "node": "Result", "type": "main", "index": 0 }]]
+		}
+	},
+	"active": false,
+	"settings": {},
+	"versionId": "version-id",
+	"id": "workflow-id",
+	"meta": { "instanceId": "instance-id" },
+	"tags": []
+}

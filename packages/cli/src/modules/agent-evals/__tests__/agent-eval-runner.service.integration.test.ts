@@ -1,3 +1,4 @@
+import { ModuleRegistry } from '@n8n/backend-common';
 import { createTeamProject, testDb, testModules } from '@n8n/backend-test-utils';
 import { GlobalConfig } from '@n8n/config';
 import {
@@ -13,7 +14,10 @@ import type { InstanceSettings } from 'n8n-core';
 import { mock } from 'vitest-mock-extended';
 
 import type { ConcurrencyControlService } from '@/concurrency/concurrency-control.service';
+import { CredentialsService } from '@/credentials/credentials.service';
 import { License } from '@/license';
+import { AgentConfigService } from '@/modules/agents/agent-config.service';
+import { AgentsSettingsService } from '@/modules/agents/agents-settings.service';
 import { Agent } from '@/modules/agents/entities/agent.entity';
 import type { AgentRepository } from '@/modules/agents/repositories/agent.repository';
 import { DataTableService } from '@/modules/data-table/data-table.service';
@@ -21,6 +25,7 @@ import type { EvalAgentExecutionService } from '@/modules/instance-ai/eval/agent
 import { createUserShell } from '@test-integration/db/users';
 
 import { AgentEvalRunnerService } from '../agent-eval-runner.service';
+import { AgentEvalsFlagGate } from '../agent-evals-flag-gate';
 
 // The agent under test runs through the real reconstruction + live-model path,
 // which needs credentials/network and is covered by the instance-ai eval suite;
@@ -46,6 +51,9 @@ const buildRunner = () =>
 		mock(),
 		Container.get(GlobalConfig),
 		instanceSettings,
+		// `loadModules` above marks agents/data-table active, so the module guard
+		// in `startRun` sees the same state production would.
+		Container.get(ModuleRegistry),
 		Container.get(AgentEvalDatasetRepository),
 		Container.get(AgentEvalRunRepository),
 		Container.get(AgentEvalResultRepository),
@@ -54,6 +62,18 @@ const buildRunner = () =>
 		evalAgentExecutionService,
 		concurrencyControl,
 		Container.get(License),
+		// Real gate, not a mock: it resolves the flag through the real
+		// `PostHogClient`, which (uninitialized here, so no network) falls back to
+		// the env overrides — exercising the operator force-enable path the
+		// `agentEvalsEnabled` assignment in `beforeEach` relies on.
+		Container.get(AgentEvalsFlagGate),
+		// Real services: every agent here has no JSON config, so judging
+		// resolves to a `status: 'error'` verdict (covered by the runner's own
+		// unit tests) rather than throwing — this suite is about execution and
+		// persistence, not the judge call itself.
+		Container.get(AgentsSettingsService),
+		Container.get(AgentConfigService),
+		Container.get(CredentialsService),
 	);
 
 /** Insert a minimal real agent row so `agent_eval_dataset.agentId`'s FK holds. */
@@ -83,6 +103,7 @@ beforeEach(async () => {
 		'AgentEvalDataset',
 	]);
 	Container.get(GlobalConfig).evaluation.agentEvalsEnabled = true;
+	await Container.get(AgentsSettingsService).setEnabled(true);
 });
 
 afterAll(async () => {
@@ -140,7 +161,7 @@ describe('AgentEvalRunnerService (integration)', () => {
 		const { runId, finished } = await runner.startRun(dataset.id, project.id, owner);
 		await finished;
 
-		const summary = await runner.getRunSummary(runId);
+		const summary = await runner.getRunSummary(runId, agent.id);
 		expect(summary.status).toBe('completed');
 		expect(summary.counts).toMatchObject({ total: 2, success: 2, error: 0, cancelled: 0 });
 
@@ -148,7 +169,7 @@ describe('AgentEvalRunnerService (integration)', () => {
 		const inputsSent = evalAgentExecutionService.executeWithLlmMock.mock.calls.map((c) => c[3]);
 		expect(inputsSent).toEqual(expect.arrayContaining(['What is 2+2?', 'Capital of France?']));
 
-		const results = await Container.get(AgentEvalResultRepository).findByRunId(runId);
+		const [results] = await Container.get(AgentEvalResultRepository).findAndCountByRunId(runId);
 		expect(results).toHaveLength(2);
 		for (const result of results) {
 			expect(result.status).toBe('success');
@@ -203,11 +224,11 @@ describe('AgentEvalRunnerService (integration)', () => {
 		const { runId, finished } = await runner.startRun(dataset.id, project.id, owner);
 		await finished;
 
-		const summary = await runner.getRunSummary(runId);
+		const summary = await runner.getRunSummary(runId, agent.id);
 		expect(summary.status).toBe('completed');
 		expect(summary.counts).toMatchObject({ total: 1, success: 0, error: 1 });
 
-		const [result] = await Container.get(AgentEvalResultRepository).findByRunId(runId);
+		const [[result]] = await Container.get(AgentEvalResultRepository).findAndCountByRunId(runId);
 		expect(result.status).toBe('error');
 		expect(result.errorCode).toBe('execution_failed');
 	});

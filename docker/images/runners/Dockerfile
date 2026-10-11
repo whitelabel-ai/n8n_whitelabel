@@ -1,4 +1,5 @@
-ARG NODE_VERSION=24.16.0
+ARG NODE_VERSION=26.10.0
+ARG PNPM_VERSION=12.4.2
 ARG PYTHON_VERSION=3.13
 
 # ==============================================================================
@@ -10,16 +11,9 @@ COPY ./dist/task-runner-javascript /app/task-runner-javascript
 WORKDIR /app/task-runner-javascript
 
 # Pin pnpm to the repo's packageManager version. `pnpm deploy` drops the
-# packageManager field from the deployed package.json, so a bare
-# `corepack enable pnpm` resolves to corepack's bundled latest (pnpm 11.x).
-# pnpm 11 defaults minimumReleaseAge to 1440 (24h), so the `pnpm add` below
-# re-resolves the deployed graph and rejects any dependency published less
-# than a day ago — e.g. a first-party @n8n_io/ai-assistant-sdk bump landed
-# within hours of its npm publish. This container step only re-resolves an
-# already-vetted, already-pinned dependency set; the real supply-chain age
-# policy is enforced by the host install (pnpm-workspace.yaml + SafeChain).
-ARG PNPM_VERSION=10.32.1
-RUN corepack enable pnpm && corepack prepare "pnpm@${PNPM_VERSION}" --activate
+# packageManager field from the deployed package.json, so nothing else here pins it.
+ARG PNPM_VERSION
+RUN npm i -g "pnpm@${PNPM_VERSION}"
 
 # Remove `catalog` and `workspace` references from package.json to allow `pnpm add` in extended images
 RUN node -e "const pkg = require('./package.json'); \
@@ -36,7 +30,13 @@ RUN node -e "const pkg = require('./package.json'); \
     delete pkg.devDependencies; \
     require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2));"
 
-# Install selected third-party modules used by Code node JavaScript sandbox
+# `--config.minimum-release-age=0`: pnpm defaults it to 1440 (24h), which would make
+# this reject any dependency published less than a day ago. This step only installs
+# pinned versions; the real supply-chain age policy is enforced by the host install
+# (pnpm-workspace.yaml + SafeChain).
+# Install selected third-party modules used by Code node JavaScript sandbox.
+# luxon is not listed: the runner already ships it, and a second copy would break
+# `instanceof DateTime` checks against `$now`.
 RUN rm -f node_modules/.modules.yaml && \
     pnpm add \
     moment@2.30.1 \
@@ -47,12 +47,11 @@ RUN rm -f node_modules/.modules.yaml && \
     papaparse@5.5.2 \
     csv-parse@5.6.0 \
     date-fns@4.1.0 \
-    luxon@3.5.0 \
     mathjs@14.2.1 \
     pdf-lib@1.17.1 \
     pdfkit@0.16.0 \
     jszip@3.10.1 \
-    --prod --no-lockfile
+    --save-prod --no-lockfile --config.minimum-release-age=0
 
 # ==============================================================================
 # STAGE 2: Python runner build (@n8n/task-runner-python) with uv
@@ -110,7 +109,7 @@ RUN uv pip install . && rm -rf /app/task-runner-python/src
 # ==============================================================================
 FROM debian:bookworm-slim AS launcher-downloader
 ARG TARGETPLATFORM
-ARG LAUNCHER_VERSION=1.4.7
+ARG LAUNCHER_VERSION=1.5.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates wget tar && \
@@ -146,18 +145,17 @@ ENV NODE_ENV=production \
 COPY --from=python-runner-builder /usr/local/bin/uv /usr/local/bin/uv
 
 # Install runtime dependencies. tini handles PID 1 signal forwarding; libstdc++6
-# is required by Node native modules.
+# and libatomic1 are required by the Node binary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates tini libstdc++6 && \
+      ca-certificates tini libstdc++6 libatomic1 && \
     apt-get upgrade -y && \
     pip install --no-cache-dir "pip>=26.0" && \
     rm -rf /var/lib/apt/lists/*
 
-# Bring node, corepack and pnpm over from the JS builder stage (glibc-linked)
+# Bring node and pnpm over from the JS builder stage (glibc-linked). pnpm 12
+# installs a standalone native executable, so the runtime needs neither npm nor Corepack.
 COPY --from=javascript-runner-builder /usr/local/bin/node /usr/local/bin/node
-COPY --from=javascript-runner-builder /usr/local/lib/node_modules/corepack /usr/local/lib/node_modules/corepack
-RUN ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack && \
-    ln -s ../lib/node_modules/corepack/dist/pnpm.js /usr/local/bin/pnpm
+COPY --from=javascript-runner-builder /usr/local/lib/node_modules/pnpm/pnpm /usr/local/bin/pnpm
 
 RUN groupadd -r -g 1000 runner \
  && useradd  -r -u 1000 -g runner -d /home/runner -m -s /usr/sbin/nologin runner

@@ -5,24 +5,18 @@ import {
 	SUB_AGENT_MAX_CHILDREN_MAX,
 	SUB_AGENT_MAX_CHILDREN_MIN,
 	SUB_AGENT_TASK_DIFFICULTIES,
-	AI_GATEWAY_MANAGED_TAG,
 	type SubAgentTaskDifficulty,
 } from '@n8n/api-types';
 import type { BaseTextKey } from '@n8n/i18n';
-import {
-	N8nIconButton,
-	N8nInputNumber2,
-	N8nSwitch2,
-	N8nText,
-	N8nTooltip,
-} from '@n8n/design-system';
+import { N8nIconButton, N8nInputNumber, N8nSwitch2, N8nText, N8nTooltip } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
-import { useToast } from '@/app/composables/useToast';
-import { useUsersStore } from '@/features/settings/users/users.store';
+import { useToast } from '@n8n/composables/useToast';
+import { useUsersStore } from '@n8n/stores/users.store';
 
 import { useAgentModelCredentials } from '../composables/useAgentModelCredentials';
 import { useModelCatalog } from '../composables/useModelCatalog';
 import AgentModelSelector from './AgentModelSelector.vue';
+import AgentPanel from './AgentPanel.vue';
 import {
 	type AgentCredentialsByProvider,
 	type AgentModelOption,
@@ -63,7 +57,7 @@ const toast = useToast();
 const usersStore = useUsersStore();
 const { ensureLoaded, getModelsForPicker, isLoading } = useModelCatalog();
 const projectIdRef = computed(() => props.projectId);
-const { credentialsByProvider, selectCredential } = useAgentModelCredentials(
+const { credentialsByProvider } = useAgentModelCredentials(
 	usersStore.currentUserId ?? 'anonymous',
 	projectIdRef,
 );
@@ -102,11 +96,6 @@ function clearPendingDifficultyCredential(
 	};
 }
 
-function isManagedCredentialForDifficulty(difficulty: SubAgentTaskDifficulty): boolean {
-	return (
-		props.config?.subAgents?.modelsByDifficulty?.[difficulty]?.credential === AI_GATEWAY_MANAGED_TAG
-	);
-}
 const maxChildrenHintInterpolate = {
 	min: String(SUB_AGENT_MAX_CHILDREN_MIN),
 	max: String(SUB_AGENT_MAX_CHILDREN_MAX),
@@ -120,9 +109,16 @@ watch(
 	{ immediate: true },
 );
 
-const filteredModels = computed<AgentModelsByProvider>(() =>
-	getModelsForPicker(credentialsByProvider.value),
-);
+// Model lists are credential-scoped — n8n Connect serves an allowlist, a user's
+// own credential serves the provider's full catalog — so each difficulty has to
+// resolve its own list from the credential it actually uses.
+const modelsByDifficulty = computed(() => {
+	const entries = SUB_AGENT_TASK_DIFFICULTIES.map((difficulty) => [
+		difficulty,
+		getModelsForPicker(credentialsForDifficulty(difficulty)),
+	]);
+	return Object.fromEntries(entries) as Record<SubAgentTaskDifficulty, AgentModelsByProvider>;
+});
 
 function resolveMaxChildrenDisplay(value: number | undefined): number {
 	return value ?? SUB_AGENT_MAX_CHILDREN_DEFAULT;
@@ -180,7 +176,7 @@ function selectedModelForDifficulty(difficulty: SubAgentTaskDifficulty): AgentMo
 	const parsed = parseModelString(mapping.model);
 	if (!parsed || !isAgentModelProvider(parsed.provider)) return null;
 
-	const registryEntry = filteredModels.value[parsed.provider]?.models.find(
+	const registryEntry = modelsByDifficulty.value[difficulty][parsed.provider]?.models.find(
 		(model) => model.model === parsed.name,
 	);
 	if (registryEntry) return registryEntry;
@@ -200,6 +196,10 @@ function selectedModelForDifficulty(difficulty: SubAgentTaskDifficulty): AgentMo
 
 function hasDifficultyMapping(difficulty: SubAgentTaskDifficulty): boolean {
 	return Boolean(props.config?.subAgents?.modelsByDifficulty?.[difficulty]);
+}
+
+function boundCredentialForDifficulty(difficulty: SubAgentTaskDifficulty): string | null {
+	return props.config?.subAgents?.modelsByDifficulty?.[difficulty]?.credential ?? null;
 }
 
 const hasAnyDifficultyMapping = computed(() =>
@@ -281,32 +281,23 @@ function onDifficultySelectCredential(
 	provider: AgentModelProvider,
 	credentialId: string | null,
 ) {
-	if (props.disabled) return;
-
-	// The n8n Connect managed tag has no per-difficulty storage until a model is
-	// chosen, so record it in the shared selection to unlock the model list (via
-	// the credentials fallback). Clear any pending own credential for this provider
-	// so the managed tag isn't shadowed when the next model pick is persisted.
-	if (credentialId === AI_GATEWAY_MANAGED_TAG) {
-		selectCredential(provider, credentialId);
-		clearPendingDifficultyCredential(difficulty, provider);
-	}
+	if (props.disabled || !credentialId) return;
 
 	const mapping = props.config?.subAgents?.modelsByDifficulty?.[difficulty];
 	const mappingProvider = mapping?.model ? parseModelString(mapping.model)?.provider : undefined;
 
 	// A model is already mapped for this provider → update its credential in place.
-	if (mapping?.model && mappingProvider === provider && credentialId) {
+	if (mapping?.model && mappingProvider === provider) {
 		clearPendingDifficultyCredential(difficulty, provider);
 		emitModelsByDifficulty(difficulty, { ...mapping, credential: credentialId });
 		return;
 	}
 
-	// No model chosen yet: remember a real credential per-difficulty so the next
-	// model pick uses it (the managed tag already flows via the shared selection).
-	if (credentialId && credentialId !== AI_GATEWAY_MANAGED_TAG) {
-		setPendingDifficultyCredential(difficulty, provider, credentialId);
-	}
+	// No model chosen yet: remember the choice per-difficulty so the next model
+	// pick uses it. This includes the n8n Connect tag — writing that to the shared
+	// selection instead would leak it into the other difficulties and the main
+	// model selector, and persist it where the user never chose it.
+	setPendingDifficultyCredential(difficulty, provider, credentialId);
 }
 
 function clearDifficultyMapping(difficulty: SubAgentTaskDifficulty) {
@@ -321,9 +312,14 @@ function clearDifficultyMapping(difficulty: SubAgentTaskDifficulty) {
 </script>
 
 <template>
-	<div :class="$style.subAgentsPanel" :aria-disabled="disabled">
-		<div :class="$style.settingRow">
-			<div :class="$style.settingLabel">
+	<AgentPanel
+		:header="i18n.baseText('agents.builder.subAgents.title')"
+		:description="i18n.baseText('agents.builder.subAgents.settings.description')"
+		:class="$style.subAgentsPanel"
+		:aria-disabled="disabled"
+	>
+		<div :class="shared.settingRow">
+			<div :class="shared.settingLabel">
 				<N8nText step="sm" bold :class="shared.dataEntryLabel">
 					{{ i18n.baseText('agents.builder.subAgents.maxChildren.label') }}
 				</N8nText>
@@ -335,20 +331,21 @@ function clearDifficultyMapping(difficulty: SubAgentTaskDifficulty) {
 					}}
 				</N8nText>
 			</div>
-			<N8nInputNumber2
+			<N8nInputNumber
 				:model-value="maxChildrenModelValue"
 				:min="SUB_AGENT_MAX_CHILDREN_MIN"
 				:max="SUB_AGENT_MAX_CHILDREN_MAX"
 				:precision="0"
+				:controls="false"
 				:disabled="disabled"
-				:class="$style.shortInput"
+				:class="shared.settingControlShort"
 				data-testid="agent-sub-agents-max-children-input"
 				@update:model-value="onMaxChildrenChange"
 			/>
 		</div>
 
-		<div :class="$style.settingRow">
-			<div :class="$style.settingLabel">
+		<div :class="shared.settingRow">
+			<div :class="shared.settingLabel">
 				<N8nText step="sm" bold :class="shared.dataEntryLabel">
 					{{ i18n.baseText('agents.builder.subAgents.customModelRouting.label' as BaseTextKey) }}
 				</N8nText>
@@ -359,6 +356,7 @@ function clearDifficultyMapping(difficulty: SubAgentTaskDifficulty) {
 			<N8nSwitch2
 				:model-value="customModelRoutingEnabled"
 				:disabled="disabled"
+				:class="shared.settingControl"
 				data-testid="agent-sub-agents-custom-model-routing-toggle"
 				@update:model-value="onCustomModelRoutingToggle"
 			/>
@@ -373,10 +371,10 @@ function clearDifficultyMapping(difficulty: SubAgentTaskDifficulty) {
 				<div
 					v-for="difficulty in SUB_AGENT_TASK_DIFFICULTIES"
 					:key="difficulty"
-					:class="$style.difficultyRow"
+					:class="shared.settingRow"
 					:data-testid="`agent-sub-agents-difficulty-row-${difficulty}`"
 				>
-					<div :class="$style.difficultyLabel">
+					<div :class="shared.settingLabel">
 						<N8nText step="sm" bold :class="shared.dataEntryLabel">
 							{{ i18n.baseText(DIFFICULTY_LABEL_KEYS[difficulty]) }}
 						</N8nText>
@@ -384,16 +382,16 @@ function clearDifficultyMapping(difficulty: SubAgentTaskDifficulty) {
 							{{ i18n.baseText(DIFFICULTY_DESCRIPTION_KEYS[difficulty]) }}
 						</N8nText>
 					</div>
-					<div :class="$style.difficultyControls">
+					<div :class="shared.settingControlWide">
 						<AgentModelSelector
 							:selected-model="selectedModelForDifficulty(difficulty)"
 							:credentials="credentialsForDifficulty(difficulty)"
-							:models-by-provider="filteredModels"
+							:models-by-provider="modelsByDifficulty[difficulty]"
 							:is-loading="isLoading"
 							:project-id="projectId"
 							:warn-missing-credentials="true"
+							:bound-credential-id="boundCredentialForDifficulty(difficulty)"
 							:disabled="disabled"
-							:is-managed-credential="isManagedCredentialForDifficulty(difficulty)"
 							:data-testid="`agent-sub-agents-difficulty-${difficulty}-model`"
 							@change="(selection) => onDifficultyModelChange(difficulty, selection)"
 							@select-credential="
@@ -421,7 +419,7 @@ function clearDifficultyMapping(difficulty: SubAgentTaskDifficulty) {
 				</div>
 			</div>
 		</div>
-	</div>
+	</AgentPanel>
 </template>
 
 <style lang="scss" module>
@@ -430,28 +428,6 @@ function clearDifficultyMapping(difficulty: SubAgentTaskDifficulty) {
 	flex-direction: column;
 	gap: var(--spacing--sm);
 	width: 100%;
-}
-
-.settingRow {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: var(--spacing--sm);
-	min-height: var(--spacing--xl);
-	width: 100%;
-}
-
-.settingLabel {
-	display: flex;
-	flex-direction: column;
-	gap: var(--spacing--5xs);
-	flex: 1;
-	min-width: 0;
-}
-
-.shortInput {
-	width: 140px;
-	flex-shrink: 0;
 }
 
 .inlineModelsSection {
@@ -467,34 +443,5 @@ function clearDifficultyMapping(difficulty: SubAgentTaskDifficulty) {
 	gap: var(--spacing--xs);
 	padding-left: var(--spacing--sm);
 	border-left: var(--border);
-}
-
-.difficultyRow {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: var(--spacing--sm);
-	min-height: var(--spacing--xl);
-}
-
-.difficultyLabel {
-	display: flex;
-	flex-direction: column;
-	gap: var(--spacing--5xs);
-	flex: 1;
-	min-width: 0;
-}
-
-.difficultyControls {
-	display: flex;
-	align-items: center;
-	justify-content: flex-end;
-	gap: var(--spacing--2xs);
-	min-width: calc(var(--spacing--5xl) + var(--spacing--2xs));
-}
-
-.difficultyControls > :first-child {
-	flex: 1;
-	min-width: calc(var(--spacing--5xl) - var(--spacing--xl));
 }
 </style>

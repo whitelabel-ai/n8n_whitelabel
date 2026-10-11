@@ -26,17 +26,17 @@ vi.mock('@/features/credentials/credentials.store', () => ({
 				.flat()
 				.find((c) => c.id === id),
 		fetchCredentialTypes: vi.fn().mockResolvedValue(undefined),
-		fetchAllCredentialsForWorkflow: vi.fn().mockResolvedValue(undefined),
+		fetchUsableCredentials: vi.fn().mockResolvedValue(undefined),
 	}),
 }));
 
 vi.mock('@/app/stores/aiGateway.store', () => ({
 	useAiGatewayStore: () => ({
-		isCredentialTypeSupported: (type: string) => aiGatewayState.supportedTypes.has(type),
+		canServeCredentialType: (type: string) => aiGatewayState.supportedTypes.has(type),
 	}),
 }));
 
-vi.mock('@/app/stores/settings.store', () => ({
+vi.mock('@n8n/stores/settings.store', () => ({
 	useSettingsStore: () => ({
 		get isAiGatewayEnabled() {
 			return aiGatewayState.isEnabled.value;

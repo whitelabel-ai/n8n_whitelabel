@@ -1,6 +1,7 @@
-import { Logger } from '@n8n/backend-common';
+import type { AgentEvalVerdict, AgentEvalRunSummary } from '@n8n/api-types';
+import { Logger, ModuleRegistry } from '@n8n/backend-common';
 import { GlobalConfig } from '@n8n/config';
-import type { AgentEvalDataset, AgentEvalResult, AgentEvalRunStatus, User } from '@n8n/db';
+import type { AgentEvalDataset, AgentEvalResult, User } from '@n8n/db';
 import {
 	AgentEvalDatasetRepository,
 	AgentEvalResultRepository,
@@ -19,15 +20,21 @@ import { jsonParse, jsonStringify } from 'n8n-workflow';
 import pLimit from 'p-limit';
 
 import { ConcurrencyControlService } from '@/concurrency/concurrency-control.service';
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
-import { NotFoundError } from '@/errors/response-errors/not-found.error';
+import { CredentialsService } from '@/credentials/credentials.service';
+import { BadRequestError, ForbiddenError, NotFoundError } from '@n8n/errors';
 import { resolveEvaluationConcurrencyLimit } from '@/evaluation.ee/evaluation-concurrency.helper';
 import { License } from '@/license';
+import { AgentConfigService } from '@/modules/agents/agent-config.service';
+import { AgentsSettingsService } from '@/modules/agents/agents-settings.service';
 import { AgentRepository } from '@/modules/agents/repositories/agent.repository';
 import { DataTableService } from '@/modules/data-table/data-table.service';
 import { EvalAgentExecutionService } from '@/modules/instance-ai/eval/agent-execution.service';
 import { userHasScopes } from '@/permissions.ee/check-access';
+
+import { generateFixSuggestion } from './agent-eval-fix-suggestion';
+import { judgeAgentAnswer } from './agent-eval-judge';
+import { AgentEvalsFlagGate } from './agent-evals-flag-gate';
+import { assertRequiredModulesActive } from './agent-evals-required-modules';
 
 const ROW_PAGE_SIZE = 100;
 // Per-run in-flight cap layered on the shared evaluation queue: keeps one run
@@ -36,6 +43,9 @@ const MAX_PER_RUN_CONCURRENCY = 10;
 // Each case is a real agent execution, so a run is capped rather than letting a
 // large table launch thousands of model calls. Raise deliberately if needed.
 const MAX_CASES = 500;
+// `setTimeout` holds its delay in a 32-bit int and silently coerces anything
+// larger to 1ms, so a deadline past ~24.8 days must be clamped, not passed on.
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 /** A dataset row resolved into a runnable case via the dataset's column mapping. */
 interface ResolvedCase {
@@ -52,12 +62,6 @@ interface CaseUsage {
 	outputTokens: number;
 }
 
-export interface AgentEvalRunSummary {
-	runId: string;
-	status: AgentEvalRunStatus;
-	counts: { total: number; success: number; error: number; cancelled: number; pending: number };
-}
-
 /**
  * Executes an agent-eval dataset against a real agent and persists per-case
  * results, then aggregates run-level status.
@@ -69,6 +73,8 @@ export interface AgentEvalRunSummary {
  * queue (the same one the workflow eval uses), so a single run can't flood the
  * queue and concurrent runs can't collectively exceed the plan limit;
  * cross-main *cancellation* is honored via the run's `cancelRequested` flag.
+ * A run-level deadline bounds the wall clock, since a 1-slot plan otherwise
+ * lets a large dataset run until the process restarts.
  * Behind the `101_agent_evals` flag.
  */
 @Service()
@@ -77,6 +83,7 @@ export class AgentEvalRunnerService {
 		private readonly logger: Logger,
 		private readonly globalConfig: GlobalConfig,
 		private readonly instanceSettings: InstanceSettings,
+		private readonly moduleRegistry: ModuleRegistry,
 		private readonly datasetRepository: AgentEvalDatasetRepository,
 		private readonly runRepository: AgentEvalRunRepository,
 		private readonly resultRepository: AgentEvalResultRepository,
@@ -85,6 +92,10 @@ export class AgentEvalRunnerService {
 		private readonly evalAgentExecutionService: EvalAgentExecutionService,
 		private readonly concurrencyControl: ConcurrencyControlService,
 		private readonly license: License,
+		private readonly flagGate: AgentEvalsFlagGate,
+		private readonly agentsSettingsService: AgentsSettingsService,
+		private readonly agentConfigService: AgentConfigService,
+		private readonly credentialsService: CredentialsService,
 	) {}
 
 	/**
@@ -98,18 +109,17 @@ export class AgentEvalRunnerService {
 		user: User,
 		options: { timeoutMs?: number } = {},
 	): Promise<{ runId: string; finished: Promise<void> }> {
-		// Behind 101_agent_evals. `agentEvalsEnabled` is a force-enable-only operator
-		// override, so this treats it as the sole gate for now. When the REST layer
-		// lands it must instead resolve the flag per-user via PostHog (which is the
-		// source of truth for cohort rollout) — a rolled-out user shouldn't need the
-		// env var. Until then this stays hard-gated on the override.
-		if (!this.globalConfig.evaluation.agentEvalsEnabled) {
-			throw new BadRequestError('Agent evals are not enabled on this instance.');
-		}
+		// Per user, since PostHog owns cohort rollout. The REST layer gates too — this
+		// is the backstop for any other caller.
+		await this.flagGate.assertEnabled(user);
 
 		if (this.globalConfig.executions.mode === 'queue') {
 			throw new BadRequestError('Agent eval runs are not supported in queue mode.');
 		}
+
+		// Backstop for direct callers; the REST path asserts before its own lookups.
+		assertRequiredModulesActive(this.moduleRegistry);
+		await this.agentsSettingsService.assertEnabled();
 
 		// Authorize up front. `executeWithLlmMock` also checks `agent:execute`, but
 		// it returns an error result rather than throwing — without this a caller
@@ -187,9 +197,89 @@ export class AgentEvalRunnerService {
 		return { runId: run.id, finished };
 	}
 
-	/** Run + per-case status counts, for polling a run's progress. */
-	async getRunSummary(runId: string): Promise<AgentEvalRunSummary> {
-		const run = await this.runRepository.findById(runId);
+	/**
+	 * Re-executes one already-seeded case in place, overwriting its own result
+	 * row. No new run, no run-level aggregation (counts/status/metrics): the
+	 * run this case belongs to may have settled minutes ago, and every sibling
+	 * result is left exactly as it was. Reuses `runCase`, the same
+	 * self-contained per-case execution `startRun`'s pool calls, with the input
+	 * read back from the result's own persisted snapshot rather than the
+	 * dataset's current Data Table row — a rerun repeats what this case
+	 * actually ran last, even if the row has since changed or been deleted.
+	 */
+	async rerunResult(
+		result: AgentEvalResult,
+		agentId: string,
+		projectId: string,
+		user: User,
+		options: { timeoutMs?: number; whatToCheck?: string } = {},
+	): Promise<AgentEvalResult> {
+		await this.flagGate.assertEnabled(user);
+
+		if (this.globalConfig.executions.mode === 'queue') {
+			throw new BadRequestError('Agent eval runs are not supported in queue mode.');
+		}
+
+		assertRequiredModulesActive(this.moduleRegistry);
+
+		// Backstop for direct callers; the REST path asserts before its own lookups.
+		if (!(await userHasScopes(user, ['agent:execute'], false, { projectId }))) {
+			throw new ForbiddenError('You do not have permission to run agents in this project.');
+		}
+		// Editing the rule rewrites eval data, so it needs more than running does —
+		// a chat-only member holds `agent:execute` but not `agent:update`.
+		if (
+			options.whatToCheck !== undefined &&
+			!(await userHasScopes(user, ['agent:update'], false, { projectId }))
+		) {
+			throw new ForbiddenError('You do not have permission to edit checks in this project.');
+		}
+
+		const input = readResultInputText(result.input);
+		if (!input) {
+			throw new BadRequestError('This case has no input to rerun.');
+		}
+
+		// Atomic, unlike the caller's snapshot status check: of two concurrent
+		// requests for the same result, only one wins the claim and executes.
+		if (!(await this.resultRepository.claimForRerun(result.id))) {
+			throw new BadRequestError(`Agent eval result ${result.id} is already running.`);
+		}
+
+		// An edited rule has no case row of its own to write back to here (the
+		// checks view only ever has this result's own snapshot) — so it's
+		// persisted onto that snapshot directly, ahead of the rerun that uses it.
+		let caseToRun = result;
+		if (options.whatToCheck !== undefined) {
+			try {
+				const snapshot = toJsonObject({ ...(result.input ?? {}), criteria: options.whatToCheck });
+				await this.resultRepository.updateInput(result.id, snapshot);
+				caseToRun = { ...result, input: snapshot };
+			} catch (error) {
+				// The claim already moved the row to `running`; settle it instead of
+				// leaving it stuck there.
+				await this.resultRepository.markAsError(result.id, 'rerun_failed', {
+					message: error instanceof Error ? error.message : String(error),
+				});
+				throw error;
+			}
+		}
+
+		await this.runCase(
+			caseToRun,
+			{ sourceRowId: caseToRun.sourceRowId, input, snapshot: caseToRun.input ?? {} },
+			{ agentId, projectId, user, timeoutMs: options.timeoutMs },
+		);
+
+		const refreshed = await this.resultRepository.findById(result.id);
+		if (!refreshed) throw new NotFoundError(`Agent eval result ${result.id} not found.`);
+		return refreshed;
+	}
+
+	// Scoped to the agent under test, so a bare run id can't read another agent's
+	// progress even if the caller skipped its own check.
+	async getRunSummary(runId: string, agentId: string): Promise<AgentEvalRunSummary> {
+		const run = await this.runRepository.findByIdAndAgentId(runId, agentId);
 		if (!run) throw new NotFoundError(`Agent eval run ${runId} not found.`);
 		// Count in the DB — this is polled by the UI, so never load the full
 		// per-case rows (input/output/toolCalls JSON) just to tally statuses.
@@ -233,48 +323,82 @@ export class AgentEvalRunnerService {
 					? Math.min(resolvedLimit, MAX_PER_RUN_CONCURRENCY)
 					: MAX_PER_RUN_CONCURRENCY,
 			);
-			// Cooperative cancellation: whichever case first observes the flag aborts,
-			// which evicts every case still waiting for a queue slot.
+			// Whichever case first observes a cancel aborts, evicting every case still
+			// queued. The deadline below trips the same signal.
 			const abort = new AbortController();
 			const totalUsage: CaseUsage = { inputTokens: 0, outputTokens: 0 };
 
-			const cancelCase = async (resultRow: AgentEvalResult) => {
+			// Set only when a case actually observed the cancellation flag, so the
+			// settle step can tell a user cancel apart from a deadline — both abort.
+			let cancelObserved = false;
+			const shouldStopCase = async (): Promise<boolean> => {
+				if (abort.signal.aborted) return true;
+				// One DB read per case at most: once the first observer aborts, the
+				// check above short-circuits for the rest.
+				if (!(await this.runRepository.isCancellationRequested(runId))) return false;
+				cancelObserved = true;
 				abort.abort();
+				return true;
+			};
+
+			// Cases the run never started: lets the settle step tell a deadline that
+			// cost work from one that merely elapsed as the last case finished.
+			let stoppedCases = 0;
+			const stopCase = async (resultRow: AgentEvalResult) => {
+				stoppedCases++;
 				await this.resultRepository.markAsCancelled(resultRow.id);
 			};
 
-			await Promise.all(
+			// An empty input can't produce an execution, so its verdict is recorded
+			// without taking a queue slot. Self-contained like `runCase`: one unusable
+			// case must not fail the run just because recording it failed.
+			const markEmptyInput = async (resultRow: AgentEvalResult) => {
+				try {
+					await this.resultRepository.markAsError(resultRow.id, 'empty_input', {
+						message: 'Case has no value in the mapped input column.',
+					});
+				} catch (error) {
+					this.logger.error(
+						`[AgentEvalRunner] Could not record empty input for case ${resultRow.id}`,
+						{ error: error instanceof Error ? error.message : String(error) },
+					);
+				}
+			};
+
+			const deadline = this.startRunDeadline(abort);
+
+			// The stop reads/writes around `runCase` sit outside its safety net, so
+			// collect their throws instead of letting one reject the whole pool.
+			const settlements = await Promise.allSettled(
 				cases.map(
 					async (resolvedCase, index) =>
 						await limit(async () => {
 							const resultRow = seeded[index];
-							// Don't enqueue a case once the run is cancelled (the flag short-
-							// circuits after the first observer, so this is one DB read per
-							// case at most).
-							if (
-								abort.signal.aborted ||
-								(await this.runRepository.isCancellationRequested(runId))
-							) {
-								await cancelCase(resultRow);
+							// Don't enqueue a case once the run is stopping.
+							if (await shouldStopCase()) {
+								await stopCase(resultRow);
 								return;
 							}
 
-							// Wait for a queue slot, bailing (and evicting the entry) if the run
-							// is cancelled while queued. The helper owns release/remove for the
-							// bail path; the finally owns release for the acquired path.
-							const executionId = `${runId}-case-${index}`;
+							// Screened before the slot, after the stop: a cancel still outranks it.
+							if (resolvedCase.input.trim().length === 0) {
+								await markEmptyInput(resultRow);
+								return;
+							}
+
+							// The helper owns release/remove when the run stops while queued;
+							// the finally owns release once a slot is held.
+							// Prefixed so the id is attributable in `n8n.execution.throttled`.
+							const executionId = `agent-eval:${runId}-case-${index}`;
 							if (!(await this.acquireEvaluationSlot(executionId, abort.signal))) {
-								await this.resultRepository.markAsCancelled(resultRow.id);
+								await stopCase(resultRow);
 								return;
 							}
 
 							try {
-								// A cancel may have landed while we waited for the slot.
-								if (
-									abort.signal.aborted ||
-									(await this.runRepository.isCancellationRequested(runId))
-								) {
-									await cancelCase(resultRow);
+								// A cancel or the deadline may have landed while we waited.
+								if (await shouldStopCase()) {
+									await stopCase(resultRow);
 									return;
 								}
 								const usage = await this.runCase(resultRow, resolvedCase, ctx);
@@ -288,25 +412,104 @@ export class AgentEvalRunnerService {
 						}),
 				),
 			);
+			// `allSettled` never rejects, so the timer is always cleared here.
+			deadline.clear();
 
+			const dispatchFailures: string[] = [];
+			for (const settlement of settlements) {
+				if (settlement.status !== 'rejected') continue;
+				const reason: unknown = settlement.reason;
+				dispatchFailures.push(reason instanceof Error ? reason.message : String(reason));
+			}
 			// Re-read once more: a cancel that arrived after every case had already
 			// settled is never observed above, so honor it rather than reporting the
-			// run completed with the flag still set.
-			const wasCancelled =
-				abort.signal.aborted || (await this.runRepository.isCancellationRequested(runId));
+			// run completed with the flag still set. Collected like the pool's throws,
+			// since letting this one escape would lose the tally it guards.
+			let wasCancelled = cancelObserved;
+			if (!wasCancelled) {
+				try {
+					wasCancelled = await this.runRepository.isCancellationRequested(runId);
+				} catch (error) {
+					dispatchFailures.push(error instanceof Error ? error.message : String(error));
+				}
+			}
+
+			if (dispatchFailures.length > 0) {
+				this.logger.error(
+					`[AgentEvalRunner] ${dispatchFailures.length} failure(s) outside case execution in run ${runId}`,
+					{ errors: dispatchFailures },
+				);
+			}
 
 			const counts = await this.resultRepository.countByStatus(runId);
 			const metrics: IDataObject = { ...toSummaryCounts(counts), usage: { ...totalUsage } };
 
+			// Every branch records the tally under `metrics`, so pollers never find a
+			// settled run whose counts are missing or filed elsewhere.
 			if (wasCancelled) {
+				// A user stop outranks the deadline: it's intent, not a failure.
 				await this.runRepository.markAsCancelled(runId, metrics);
+			} else if (deadline.hasExpired() && stoppedCases > 0) {
+				await this.runRepository.markAsError(
+					runId,
+					'timeout',
+					{
+						message: `Run exceeded its ${deadline.deadlineMinutes}-minute deadline; ${stoppedCases} case(s) were not started.`,
+					},
+					metrics,
+				);
+			} else if (dispatchFailures.length > 0) {
+				await this.runRepository.markAsError(
+					runId,
+					'case_dispatch_failed',
+					{
+						message: `${dispatchFailures.length} failure(s) occurred outside case execution.`,
+						errors: dispatchFailures,
+					},
+					metrics,
+				);
 			} else {
+				if (deadline.hasExpired()) {
+					// Overran, but nothing was left to skip. Logged for anyone tuning the
+					// limit, since the run itself still succeeded.
+					this.logger.debug(
+						`[AgentEvalRunner] Run ${runId} overran its ${deadline.deadlineMinutes}-minute deadline, but every case had finished`,
+					);
+				}
 				await this.runRepository.markAsCompleted(runId, metrics);
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			await this.failRun(runId, message);
 		}
+	}
+
+	/**
+	 * Arm the run-level deadline; expiring trips the run's abort. Non-positive
+	 * disables. Bounds when the last case may *start*, not when the run ends.
+	 */
+	private startRunDeadline(abort: AbortController): {
+		hasExpired: () => boolean;
+		clear: () => void;
+		deadlineMinutes: number;
+	} {
+		const deadlineMinutes = this.globalConfig.evaluation.agentEvalsRunTimeoutMinutes;
+		if (deadlineMinutes <= 0) {
+			return { hasExpired: () => false, clear: () => undefined, deadlineMinutes };
+		}
+
+		let expired = false;
+		const timer = setTimeout(
+			() => {
+				expired = true;
+				abort.abort();
+			},
+			Math.min(deadlineMinutes * 60_000, MAX_TIMER_DELAY_MS),
+		);
+		// Never hold the process open for a run that outlived its deadline.
+		timer.unref();
+
+		return { hasExpired: () => expired, clear: () => clearTimeout(timer), deadlineMinutes };
 	}
 
 	/**
@@ -392,7 +595,14 @@ export class AgentEvalRunnerService {
 	 * Execute one case and persist its result. Returns the case's token usage.
 	 * Fully self-contained: a thrown execution or DB error is converted into a
 	 * per-case error so one case can never abort the batch or leave its result
-	 * stuck `running`.
+	 * stuck `running`. Assumes a non-empty input — the caller screens those out
+	 * before taking a queue slot.
+	 *
+	 * On a successful execution, also grades the output via {@link judgeCase}
+	 * and persists the verdict — this is the one place both `executeRun`'s pool
+	 * and `rerunResult` (which calls this same method) run a case, so neither
+	 * duplicates the judging step. A failed rule also gets a fix suggestion on
+	 * its verdict, see {@link suggestFix}.
 	 */
 	private async runCase(
 		resultRow: AgentEvalResult,
@@ -400,13 +610,6 @@ export class AgentEvalRunnerService {
 		ctx: { agentId: string; projectId: string; user: User; timeoutMs?: number },
 	): Promise<CaseUsage | undefined> {
 		try {
-			if (resolvedCase.input.trim().length === 0) {
-				await this.resultRepository.markAsError(resultRow.id, 'empty_input', {
-					message: 'Case has no value in the mapped input column.',
-				});
-				return undefined;
-			}
-
 			await this.resultRepository.markAsRunning(resultRow.id);
 
 			const execResult = await this.evalAgentExecutionService.executeWithLlmMock(
@@ -426,6 +629,28 @@ export class AgentEvalRunnerService {
 				return usage;
 			}
 
+			// Judged before the case is marked complete, and written in the same update.
+			// The result stays `running` — which a rerun cannot claim — until the whole
+			// attempt is finished. Completing first would let a second rerun start while
+			// this judge is pending, and this judge's verdict would then overwrite the
+			// newer attempt's. It also keeps a finished case from reading as a pass while
+			// its verdict is still missing.
+			//
+			// Grading is best-effort on top of a run that already succeeded: a failure
+			// to judge must not flip the case to `error`. `runCase` is the one place both
+			// `executeRun`'s pool and `rerunResult` funnel through, so this single step
+			// covers both.
+			let verdict: JsonObject | null = null;
+			try {
+				const judged = await this.judgeCase(resolvedCase, execResult.finalText, ctx);
+				const suggestion = await this.suggestFix(judged, resolvedCase, execResult.finalText, ctx);
+				verdict = toJsonObject(suggestion ? { ...judged, suggestion } : judged);
+			} catch (error) {
+				this.logger.error(`[AgentEvalRunner] Could not judge case ${resultRow.id}`, {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+
 			await this.resultRepository.markAsCompleted(resultRow.id, {
 				output: toJsonObject({
 					finalText: execResult.finalText,
@@ -435,6 +660,7 @@ export class AgentEvalRunnerService {
 				}),
 				toolCalls: toJsonObject({ calls: execResult.toolCalls }),
 				metrics: usage ? { usage: { ...usage } } : null,
+				verdict,
 			});
 
 			return usage;
@@ -450,6 +676,59 @@ export class AgentEvalRunnerService {
 			}
 			return undefined;
 		}
+	}
+
+	/**
+	 * Grades a case's output against its rule (`criteria`) or gold answer
+	 * (`expectedOutput`, `criteria` wins if both are mapped), when the case's
+	 * snapshot has either. See {@link judgeAgentAnswer}.
+	 */
+	private async judgeCase(
+		resolvedCase: ResolvedCase,
+		output: string,
+		ctx: { agentId: string; projectId: string; user: User },
+	): Promise<AgentEvalVerdict> {
+		return await judgeAgentAnswer(
+			{
+				agentConfigService: this.agentConfigService,
+				credentialsService: this.credentialsService,
+				logger: this.logger,
+			},
+			{
+				input: resolvedCase.input,
+				output,
+				criteria: readSnapshotText(resolvedCase.snapshot, 'criteria'),
+				expectedOutput: readSnapshotText(resolvedCase.snapshot, 'expectedOutput'),
+			},
+			ctx,
+		);
+	}
+
+	/**
+	 * Asks for one instruction that would fix a failed rule. Only a rule
+	 * (`criteria`) that the judge graded and failed gets one: a gold-answer
+	 * mismatch, a pass, a skip and a judge error get none. Best-effort: it
+	 * returns `null` on failure.
+	 */
+	private async suggestFix(
+		verdict: AgentEvalVerdict,
+		resolvedCase: ResolvedCase,
+		output: string,
+		ctx: { agentId: string; projectId: string; user: User },
+	): Promise<string | null> {
+		if (verdict.status !== 'completed' || verdict.outcome !== 'fail') return null;
+		const rule = readSnapshotText(resolvedCase.snapshot, 'criteria');
+		if (!rule) return null;
+
+		return await generateFixSuggestion(
+			{
+				agentConfigService: this.agentConfigService,
+				credentialsService: this.credentialsService,
+				logger: this.logger,
+			},
+			{ input: resolvedCase.input, output, rule, reasoning: verdict.reasoning },
+			ctx,
+		);
 	}
 
 	/**
@@ -474,7 +753,7 @@ export class AgentEvalRunnerService {
 
 		// Validate the mapping against the live columns so a renamed/deleted column
 		// fails loudly here instead of silently turning every case into an
-		// "empty input" error at execution time.
+		// "empty input" error once the run starts.
 		const columnNames = new Set(
 			(await this.dataTableService.getColumns(dataTableId, tableProjectId)).map((c) => c.name),
 		);
@@ -554,6 +833,18 @@ function normalizeUsage(usage?: { inputTokens?: number; outputTokens?: number })
 	return { inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0 };
 }
 
+/**
+ * Reads `criteria`/`expectedOutput` back out of a case snapshot as judge-ready
+ * text. Mirrors {@link cellToJson}'s scalar coercion — the snapshot stores
+ * whatever the mapped Data Table cell held.
+ */
+function readSnapshotText(snapshot: JsonObject, key: 'criteria' | 'expectedOutput'): string | null {
+	const value = snapshot[key];
+	if (typeof value === 'string' && value.length > 0) return value;
+	if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+	return null;
+}
+
 /** Coerce a Data Table cell into the agent's opening message. */
 function cellToString(value: DataTableColumnJsType | undefined): string {
 	if (value === null || value === undefined) return '';
@@ -570,4 +861,18 @@ function cellToJson(value: DataTableColumnJsType | undefined): JsonValue {
 
 function toJsonObject(value: unknown): JsonObject {
 	return jsonParse<JsonObject>(jsonStringify(value), { fallbackValue: {} });
+}
+
+/**
+ * Reads the opening message back out of a result's persisted `input` snapshot
+ * — the same text this case last ran with, not a re-resolved Data Table cell
+ * (the row may have been edited or deleted since). Mirrors the editor's own
+ * `readCaseRequest` reader.
+ */
+function readResultInputText(input: JsonObject | null): string | null {
+	if (!input) return null;
+	const value = input.input;
+	if (typeof value === 'string' && value.trim().length > 0) return value;
+	if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+	return null;
 }

@@ -7,8 +7,11 @@ import type {
 import type { PackagePublishingResults } from '../entities/workflow/workflow-publisher';
 import { serializeBindings } from '../n8n-packages.types';
 import type {
+	RemovedFolderSummary,
+	RemovedWorkflowSummary,
 	ImportBindingMap,
 	ImportCredentialSummary,
+	ImportDataTableSummary,
 	ImportedFolderSummary,
 	ImportedProjectSummary,
 	ImportedWorkflowSummary,
@@ -19,7 +22,10 @@ import type {
 	PackageImportBindings,
 } from '../n8n-packages.types';
 import type { PackageManifest } from '../spec/manifest.schema';
-import type { PackageCredentialRequirement } from '../spec/requirements.schema';
+import type {
+	PackageCredentialRequirement,
+	PackageRequirementConsumer,
+} from '../spec/requirements.schema';
 
 export function toPackageSummary(manifest: PackageManifest): ImportPackageSummary {
 	return {
@@ -51,6 +57,7 @@ export function toImportedWorkflowSummaries(
 			projectId,
 			parentFolderId: current.parentFolder?.id ?? null,
 			activeVersionId: current.activeVersionId ?? null,
+			isArchived: current.isArchived,
 			publishing: result?.publishing ?? { state: 'unchanged' },
 			status,
 		};
@@ -60,20 +67,26 @@ export function toImportedWorkflowSummaries(
 export function buildImportResult(input: {
 	package: ImportPackageSummary;
 	workflows: ImportedWorkflowSummary[];
+	removedWorkflows: RemovedWorkflowSummary[];
+	removedFolders: RemovedFolderSummary[];
 	folders: ImportedFolderSummary[];
 	projects: ImportedProjectSummary[];
 	bindings: PackageImportBindings;
 	credentials: ImportCredentialSummary;
+	dataTables: ImportDataTableSummary;
 	variables: ImportVariableSummary;
 	tags: ImportTagSummary;
 }): ImportResult {
 	return {
 		package: input.package,
 		workflows: input.workflows,
+		removedWorkflows: input.removedWorkflows,
+		removedFolders: input.removedFolders,
 		folders: input.folders,
 		projects: input.projects,
 		bindings: serializeBindings(input.bindings),
 		credentials: input.credentials,
+		dataTables: input.dataTables,
 		variables: input.variables,
 		tags: input.tags,
 	};
@@ -82,23 +95,35 @@ export function buildImportResult(input: {
 export function reconcileVariableSummary(input: {
 	matched: Iterable<string>;
 	missing: Iterable<string>;
+	created: Iterable<string>;
 	stubbed: Iterable<string>;
 	skipped: Iterable<string>;
+	updated: Iterable<string>;
 }): ImportVariableSummary {
 	const matched = new Set(input.matched);
+	const created = new Set(input.created);
 	const stubbed = new Set(input.stubbed);
 	const skipped = new Set(input.skipped);
+	const updated = new Set(input.updated);
 
-	// A skipped creation means the name already existed. If this import stubbed it, we created it,
-	// so it stays in `stubbed`; otherwise it genuinely pre-existed and counts as `matched`.
+	// A skipped name that no scope of this import created genuinely pre-existed, so it counts as matched.
 	for (const name of skipped) {
-		if (!stubbed.has(name)) matched.add(name);
+		if (!created.has(name) && !stubbed.has(name)) matched.add(name);
+	}
+
+	// An overwritten name matched first, but the import rewrote it, so `updated` wins.
+	for (const name of updated) {
+		matched.delete(name);
 	}
 
 	return {
 		matched: [...matched],
+		created: [...created],
 		stubbed: [...stubbed],
-		missing: [...new Set(input.missing)].filter((name) => !stubbed.has(name) && !skipped.has(name)),
+		updated: [...updated],
+		missing: [...new Set(input.missing)].filter(
+			(name) => !created.has(name) && !stubbed.has(name) && !skipped.has(name),
+		),
 	};
 }
 
@@ -109,8 +134,10 @@ export function toVariableSummary(
 	return reconcileVariableSummary({
 		matched: plan.matched,
 		missing: plan.missing.map(({ name }) => name),
+		created: result.created,
 		stubbed: result.stubbed,
 		skipped: result.skippedExisting,
+		updated: result.updated,
 	});
 }
 
@@ -120,6 +147,7 @@ export function toTagSummary(plan: TagImportPlan): ImportTagSummary {
 		matched: plan.matched.map(({ name }) => name),
 		created: plan.creations.map(({ name }) => name),
 		renamed: plan.renames.map(({ to }) => to),
+		reconciled: plan.reconciles.map(({ name }) => name),
 		skipped: plan.dropped.map(({ name }) => name),
 	};
 }
@@ -130,14 +158,15 @@ export function unionTagSummaries(summaries: ImportTagSummary[]): ImportTagSumma
 		matched: [...new Set(summaries.flatMap(({ matched }) => matched))],
 		created: [...new Set(summaries.flatMap(({ created }) => created))],
 		renamed: [...new Set(summaries.flatMap(({ renamed }) => renamed))],
+		reconciled: [...new Set(summaries.flatMap(({ reconciled }) => reconciled))],
 		skipped: [...new Set(summaries.flatMap(({ skipped }) => skipped))],
 	};
 }
 
 /**
- * Keeps only the requirements used by the imported workflows, trimming `usedByWorkflows` to match.
+ * Keep only requirements and consumers for the imported workflows.
  */
-export function identifyRequirements<T extends { usedByWorkflows: string[] }>(
+export function identifyRequirements<T extends { usedBy: PackageRequirementConsumer[] }>(
 	requirements: T[] | undefined,
 	workflows: PreparedWorkflow[],
 ): T[] | undefined {
@@ -147,9 +176,11 @@ export function identifyRequirements<T extends { usedByWorkflows: string[] }>(
 	return requirements
 		.map((requirement) => ({
 			...requirement,
-			usedByWorkflows: requirement.usedByWorkflows.filter((id) => importedIds.has(id)),
+			usedBy: requirement.usedBy.filter(
+				({ kind, id }) => kind === 'workflow' && importedIds.has(id),
+			),
 		}))
-		.filter((requirement) => requirement.usedByWorkflows.length > 0);
+		.filter((requirement) => requirement.usedBy.length > 0);
 }
 
 /**

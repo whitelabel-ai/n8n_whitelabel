@@ -1,81 +1,9 @@
 import { Logger } from '@n8n/backend-common';
-import type { User } from '@n8n/db';
 import { Service } from '@n8n/di';
 import { ensureError } from '@n8n/utils/errors/ensure-error';
+import type { ProtectedResource } from '@n8n/inbound-auth';
 
-/**
- * Descriptor for an OAuth 2.1 protected resource served by this instance.
- *
- * All resources share a single authorization server (one issuer, one set of
- * `/authorize`/`/token`/`/register` endpoints, one signing key) but each
- * resource has its own canonical RFC 8707 resource URL, accepted audiences,
- * and advertised scopes.
- */
-export interface ProtectedResource {
-	/** Stable identifier, e.g. `'instance-mcp'`. */
-	id: string;
-
-	/** Human readable name, for consent screen */
-	displayName?: string;
-
-	/**
-	 * Canonical RFC 8707 resource URL used as the JWT `aud` claim and advertised
-	 * as the resource indicator (e.g. `https://instance.example/mcp-server/http`).
-	 * Resolved lazily so the instance base URL is read per request, matching the
-	 * previous `getCanonicalResourceUrl()` behaviour.
-	 */
-	getResourceUrl(): string;
-
-	/**
-	 * Every resource URL this resource is served at, canonical URL
-	 * (`getResourceUrl()`) first. A configured MCP base URL becomes the
-	 * canonical entry, and the instance-base-URL-derived resource follows so
-	 * clients using the instance hostname keep working. Treated as
-	 * `[getResourceUrl()]` when not implemented.
-	 */
-	getResourceUrls?(): string[];
-
-	/**
-	 * All `aud` values accepted at this resource's gate. Must include the
-	 * canonical resource URL; may include resource-specific legacy audiences.
-	 */
-	getAudiences(): string[];
-
-	/** OAuth scopes advertised for this resource in discovery documents. */
-	scopes: string[];
-
-	/**
-	 * Tool names unlocked by each grantable scope, for display on the consent
-	 * screen. Omit when the resource has no per-tool scope mapping.
-	 */
-	getScopeTools?(): Record<string, string[]>;
-
-	/**
-	 * Fallback audience for token requests that omit an RFC 8707 `resource`
-	 * parameter (pre-8707 clients). At most one registered resource may be the
-	 * default.
-	 */
-	isDefault?: boolean;
-
-	/**
-	 * Optional explicit allowlist of `redirect_uri` values accepted at
-	 * `/authorize` for this resource. Returning an empty array means "no
-	 * additional restriction" — the OAuth server still enforces the
-	 * registered-URIs match per RFC 6749 §3.1.2.4.
-	 */
-	getAllowedRedirectUris?(): Promise<string[]>;
-
-	isFirstParty?: boolean;
-
-	/**
-	 * Determine whether the given user is authorized to access this resource.
-	 * Called during the consent flow to gate access to the resource.
-	 *
-	 * @param user The user to authorize
-	 * @returns A promise that resolves to a boolean indicating whether the user is authorized
-	 **/
-	authorize(user: User): Promise<boolean>;
-}
+export type { ProtectedResource };
 
 /**
  * On-demand resolver for protected resources that aren't held in the registry's
@@ -105,13 +33,23 @@ export interface ProtectedResourceResolver {
 
 	/**
 	 * Resolve a resource by its URL path (e.g. `/webhook/wf-1/mcp`), or
-	 * `undefined` if this resolver owns no such resource. The input is
-	 * pre-normalized (trailing slash trimmed) by the registry.
+	 * `undefined` if this resolver owns no such resource. The path is
+	 * pre-normalized (query split off, trailing slash trimmed) by the registry.
+	 *
+	 * `search` is the resource identifier's query component (RFC 9728 §1.2), which
+	 * selects among resources sharing a path — e.g. the webhook resolver's
+	 * `?method=`. Resolvers keyed on path alone ignore it.
 	 */
-	resolveByPath(pathname: string): Promise<ProtectedResource | undefined>;
+	resolveByPath(pathname: string, search?: string): Promise<ProtectedResource | undefined>;
 }
 
 const trimTrailingSlash = (url: string): string => url.replace(/\/$/, '');
+
+/** Split a path into its path and query components, the latter keeping its `?`. */
+const splitQuery = (pathname: string): [string, string] => {
+	const index = pathname.indexOf('?');
+	return index === -1 ? [pathname, ''] : [pathname.slice(0, index), pathname.slice(index)];
+};
 
 const getResourceUrls = (resource: ProtectedResource): string[] =>
 	resource.getResourceUrls?.() ?? [resource.getResourceUrl()];
@@ -162,7 +100,10 @@ export class ProtectedResourceRegistry {
 
 	/** Look up a resource by its URL path (e.g. `/mcp-server/http`). */
 	async getByResourcePath(pathname: string): Promise<ProtectedResource | undefined> {
-		const normalized = trimTrailingSlash(pathname);
+		// Static resources match on the path alone, so a stray query parameter can't turn
+		// a match into a miss; only resolvers see the query.
+		const [rawPath, search] = splitQuery(pathname);
+		const normalized = trimTrailingSlash(rawPath);
 		for (const resource of this.resources.values()) {
 			for (const url of getResourceUrls(resource)) {
 				try {
@@ -177,7 +118,7 @@ export class ProtectedResourceRegistry {
 
 		for (const resolver of this.resolvers) {
 			try {
-				const resource = await resolver.resolveByPath(normalized);
+				const resource = await resolver.resolveByPath(normalized, search);
 				if (resource) return resource;
 			} catch (error) {
 				this.logResolverFailure(resolver, error);

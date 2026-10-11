@@ -76,7 +76,7 @@ describe('MondayCom Node - boardItem.get', () => {
 	});
 
 	new NodeTestHarness().setupTests({
-		workflowFiles: ['get.workflow.json'],
+		workflowFiles: ['boardItem.get.workflow.json'],
 		credentials: {
 			mondayComOAuth2Api: {
 				oauthTokenData: { access_token: 'test-token' },

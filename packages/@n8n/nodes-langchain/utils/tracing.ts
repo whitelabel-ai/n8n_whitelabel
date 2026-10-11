@@ -91,12 +91,13 @@ export function getTracingConfig(
 			? context.getParentCallbackManager()
 			: undefined;
 
-	const callbacks: any[] = [];
-	if (parentRunManager) {
-		callbacks.push(parentRunManager);
-	}
-	if (config.additionalCallbacks) {
-		callbacks.push(...config.additionalCallbacks);
+	// A parent CallbackManager must be passed as-is (not wrapped in an array) so
+	// LangChain keeps linking child runs to the parent run.
+	let callbacks: BaseCallbackConfig['callbacks'] = parentRunManager;
+	if (config.additionalCallbacks?.length) {
+		callbacks = parentRunManager
+			? parentRunManager.copy(config.additionalCallbacks)
+			: config.additionalCallbacks;
 	}
 
 	return {
@@ -107,6 +108,6 @@ export function getTracingConfig(
 			node: context.getNode().name,
 			...(config.additionalMetadata ?? {}),
 		},
-		callbacks: callbacks.length > 0 ? callbacks : undefined,
+		callbacks,
 	};
 }

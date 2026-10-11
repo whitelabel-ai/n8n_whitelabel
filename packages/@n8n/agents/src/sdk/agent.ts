@@ -1,4 +1,5 @@
 import type { ProviderOptions } from '@ai-sdk/provider-utils';
+import { getProviderPrefix } from '@n8n/ai-utilities/agent-config';
 import type { JSONSchema7 } from 'json-schema';
 import type { z } from 'zod';
 
@@ -9,10 +10,16 @@ import { Memory, normalizeMemoryConfig, resolveMemoryConfigDefaults } from './me
 import { Telemetry } from './telemetry';
 import { wrapToolForApproval } from './tool';
 import type { VectorStore } from './vector-store';
-import { AgentRuntime, type AgentRuntimeConfig } from '../runtime/loop/agent-runtime';
+import {
+	AgentRuntime,
+	type AgentRuntimeConfig,
+	type VolatileInstructionsProvider,
+} from '../runtime/loop/agent-runtime';
 import { ensureUniqueMcpToolNames } from '../runtime/mcp/mcp-tool-resolver';
 import { RECALL_MEMORY_TOOL_NAME } from '../runtime/memory/episodic-memory';
+import { FLAG_MEMORY_TOOL_NAME } from '../runtime/memory/episodic-memory-capture';
 import type { ScopedMemoryTaskEvent } from '../runtime/memory/scoped-memory-task-runner';
+import { AgentMessageList } from '../runtime/model/message-list';
 import type { FetchFn } from '../runtime/model/model-factory';
 import { mergeProviderOptions } from '../runtime/model/prompt-cache';
 import { AgentEventBus } from '../runtime/state/event-bus';
@@ -26,12 +33,14 @@ import {
 	DELEGATE_SUB_AGENT_TOOL_NAME,
 	INLINE_SUB_AGENT_ID,
 	createDelegateSubAgentTool,
-	failedDelegatedChildSuspendOutput,
 	generateResultToDelegateSubAgentOutput,
 	getInlineDelegateSubAgentToolOptions,
 	isDelegateSubAgentTool,
 	renderDelegateSubAgentPrompt,
+	type DelegateSubAgentCancelRequest,
 	type DelegateSubAgentRequest,
+	type DelegateSubAgentResumeRequest,
+	type DelegateSubAgentRunnerHelpers,
 	type DelegateSubAgentToolOutput,
 	type InlineSubAgentProviderToolsResolver,
 	type SubAgentTaskDifficulty,
@@ -58,6 +67,7 @@ import type {
 	BuiltTelemetry,
 	CheckpointStore,
 	ExecutionOptions,
+	FinishReason,
 	GenerateResult,
 	MemoryConfig,
 	ModelConfig,
@@ -68,6 +78,7 @@ import type {
 	StreamResult,
 	ThinkingConfig,
 	ThinkingConfigFor,
+	TokenUsage,
 	ResumeOptions,
 	McpConnectionFailedEvent,
 } from '../types';
@@ -75,12 +86,14 @@ import type { AgentEvent } from '../types/runtime/event';
 import type { StreamChunk } from '../types/sdk/agent';
 import type { AgentBuilder } from '../types/sdk/agent-builder';
 import type { AgentMessage } from '../types/sdk/message';
+import { modelConfigToId } from '../utils/model';
 import type { Workspace } from '../workspace/workspace';
 
 type ToolParameter = BuiltTool | { build(): BuiltTool };
 
 const SDK_INLINE_SUB_AGENT_BLOCKED_TOOL_NAMES = new Set([
 	DELEGATE_SUB_AGENT_TOOL_NAME,
+	FLAG_MEMORY_TOOL_NAME,
 	RECALL_MEMORY_TOOL_NAME,
 	WRITE_TODOS_TOOL_NAME,
 ]);
@@ -89,6 +102,15 @@ const SDK_RESERVED_BUILTIN_TOOL_NAMES = new Set([
 	DELEGATE_SUB_AGENT_TOOL_NAME,
 	WRITE_TODOS_TOOL_NAME,
 ]);
+
+function configuredSubAgentNotFound(request: DelegateSubAgentRequest): DelegateSubAgentToolOutput {
+	return {
+		status: 'failed',
+		taskPath: request.taskPath,
+		answer: '',
+		error: `No configured subagent matched "${request.subAgentId}". Use "inline" for an inline sub-agent, or pass one of the configured subagent IDs.`,
+	};
+}
 
 interface DeferredToolOptions {
 	search?: {
@@ -185,6 +207,8 @@ export class Agent implements BuiltAgent, AgentBuilder {
 
 	private checkpointStore?: 'memory' | CheckpointStore;
 
+	private runStateManager?: RunStateManager;
+
 	private thinkingConfig?: ThinkingConfig;
 
 	private reasoningLevel?: ReasoningLevel;
@@ -207,6 +231,8 @@ export class Agent implements BuiltAgent, AgentBuilder {
 	 * Merged with `mcpClients`-sourced failures by `getMcpConnectionFailures()`.
 	 */
 	private externalMcpConnectionFailures: McpConnectionFailedEvent[] = [];
+
+	private volatileInstructionsProviderValue?: VolatileInstructionsProvider;
 
 	private defaultExecutionOptions?: ExecutionOptions;
 
@@ -264,6 +290,12 @@ export class Agent implements BuiltAgent, AgentBuilder {
 	instructions(text: string, options?: { providerOptions?: ProviderOptions }): this {
 		this.instructionsText = text;
 		this.instructionProviderOpts = options?.providerOptions;
+		return this;
+	}
+
+	/** Set the provider that supplies host instructions before each model call. */
+	volatileInstructionsProvider(provider: VolatileInstructionsProvider): this {
+		this.volatileInstructionsProviderValue = provider;
 		return this;
 	}
 
@@ -416,6 +448,9 @@ export class Agent implements BuiltAgent, AgentBuilder {
 	 * ```
 	 */
 	checkpoint(storage: 'memory' | CheckpointStore): this {
+		if (this.checkpointStore !== storage) {
+			this.runStateManager = undefined;
+		}
 		this.checkpointStore = storage;
 		return this;
 	}
@@ -802,6 +837,20 @@ export class Agent implements BuiltAgent, AgentBuilder {
 		}
 	}
 
+	async resumePaused(
+		options: Omit<ResumeOptions, 'toolCallId'> & ExecutionOptions,
+	): Promise<StreamResult> {
+		const config = await this.ensureBuilt();
+		const active = this.createRuntime(config, options.runId);
+		try {
+			const result = await active.runtime.resumePaused(options);
+			return { ...result, stream: this.trackStreamRuntime(result.stream, active) };
+		} catch (error) {
+			await this.cleanupRuntime(active);
+			throw error;
+		}
+	}
+
 	/**
 	 * Durable-log RFC (resilience phase): re-drive a run from a `running`-status
 	 * step checkpoint after a process crash. There is no pending tool call to
@@ -860,16 +909,23 @@ export class Agent implements BuiltAgent, AgentBuilder {
 
 	/**
 	 * @internal Lazy-build the agent on first use. Stores the promise so
-	 * concurrent callers share one build operation. On error the promise is
-	 * cleared so the caller can retry.
+	 * concurrent callers share one build operation. An error clears the promise.
+	 * An MCP connection failure also clears it so the next run can retry discovery.
 	 */
 	private async ensureBuilt(): Promise<AgentRuntimeConfig> {
 		if (!this.buildPromise) {
 			const p = this.build();
 			this.buildPromise = p;
-			p.catch(() => {
-				if (this.buildPromise === p) this.buildPromise = undefined;
-			});
+			void p.then(
+				(config) => {
+					if (config.mcpConnectionFailures?.length && this.buildPromise === p) {
+						this.buildPromise = undefined;
+					}
+				},
+				() => {
+					if (this.buildPromise === p) this.buildPromise = undefined;
+				},
+			);
 		}
 		return await this.buildPromise;
 	}
@@ -1043,7 +1099,6 @@ export class Agent implements BuiltAgent, AgentBuilder {
 
 		let instructions = this.instructionsText;
 		if (this.skillSource) {
-			await this.skillSource.prepare?.();
 			instructions = appendSkillCatalogToInstructions(instructions, this.skillSource.registry);
 		}
 		if (this.workspaceInstance) {
@@ -1057,10 +1112,12 @@ export class Agent implements BuiltAgent, AgentBuilder {
 			finalDeferredTools.length > 0 && this.deferredToolSearchTopK !== undefined
 				? { topK: this.deferredToolSearchTopK }
 				: undefined;
+		const runState = (this.runStateManager ??= new RunStateManager(this.checkpointStore));
 
 		allTools = this.completeInlineDelegateTools(allTools, {
 			deferredTools: finalDeferredTools,
 			modelConfig,
+			runState,
 			...(telemetry !== undefined ? { telemetry } : {}),
 			...(this.concurrencyValue !== undefined
 				? { toolCallConcurrency: this.concurrencyValue }
@@ -1081,15 +1138,17 @@ export class Agent implements BuiltAgent, AgentBuilder {
 			modelCost = undefined;
 		}
 
-		const runState = new RunStateManager(this.checkpointStore);
-
 		return {
 			name: this.name,
 			model: modelConfig,
 			...(this.modelFetchValue !== undefined ? { modelFetch: this.modelFetchValue } : {}),
 			instructions,
+			...(this.skillSource ? { skillSource: this.skillSource } : {}),
 			tools: allTools.length > 0 ? allTools : undefined,
 			deferredTools: finalDeferredTools.length > 0 ? finalDeferredTools : undefined,
+			...(this.workspaceInstance?.filesystem && this.workspaceInstance.filesystem.readOnly !== true
+				? { workspaceFilesystem: this.workspaceInstance.filesystem }
+				: {}),
 			toolSearch,
 			instructionProviderOptions: this.instructionProviderOpts,
 			providerTools: this.providerTools.length > 0 ? this.providerTools : undefined,
@@ -1110,6 +1169,9 @@ export class Agent implements BuiltAgent, AgentBuilder {
 			runState,
 			...(this.onMemoryTaskEvent ? { onMemoryTaskEvent: this.onMemoryTaskEvent } : {}),
 			...(mcpConnectionFailures.length > 0 ? { mcpConnectionFailures } : {}),
+			...(this.volatileInstructionsProviderValue
+				? { volatileInstructionsProvider: this.volatileInstructionsProviderValue }
+				: {}),
 		};
 	}
 
@@ -1118,6 +1180,7 @@ export class Agent implements BuiltAgent, AgentBuilder {
 		options: {
 			deferredTools: BuiltTool[];
 			modelConfig: ModelConfig;
+			runState: RunStateManager;
 			telemetry?: BuiltTelemetry;
 			toolCallConcurrency?: number;
 			toolSearch?: { topK?: number };
@@ -1135,23 +1198,60 @@ export class Agent implements BuiltAgent, AgentBuilder {
 				resolveInlineSubAgentProviderTools: delegateOptions.resolveInlineSubAgentProviderTools,
 			});
 			const hostRunner = delegateOptions.runSubAgent;
+			const hostResumeRunner = delegateOptions.resumeSubAgent;
+			const hostCancelRunner = delegateOptions.cancelSubAgent;
+			const inlineChildCanSuspend = [...tools, ...options.deferredTools].some(
+				(candidate) => !isDelegateSubAgentTool(candidate) && candidate.suspendSchema !== undefined,
+			);
+			const childCanSuspend = hostResumeRunner !== undefined || inlineChildCanSuspend;
 			const completedTool = createDelegateSubAgentTool({
 				...delegateOptions,
-				runSubAgent: async (request, _helpersFromHandler) => {
-					const helpers = { runInlineSubAgent };
+				runSubAgent: async (request, helpersFromHandler) => {
+					const helpers = {
+						runInlineSubAgent: async (req: DelegateSubAgentRequest) =>
+							await runInlineSubAgent(req, helpersFromHandler.emitChunk),
+						emitChunk: helpersFromHandler.emitChunk,
+					};
 					if (hostRunner) {
 						return await hostRunner(request, helpers);
 					}
 					if (request.subAgentId === INLINE_SUB_AGENT_ID) {
-						return await runInlineSubAgent(request);
+						return await runInlineSubAgent(request, helpersFromHandler.emitChunk);
 					}
-					return {
-						status: 'failed',
-						taskPath: request.taskPath,
-						answer: '',
-						error: `No configured subagent matched "${request.subAgentId}". Use "inline" for an inline sub-agent, or pass one of the configured subagent IDs.`,
-					};
+					return configuredSubAgentNotFound(request);
 				},
+				...(childCanSuspend
+					? {
+							resumeSubAgent: async (
+								request: DelegateSubAgentResumeRequest,
+								helpersFromHandler: DelegateSubAgentRunnerHelpers,
+							) => {
+								if (hostResumeRunner !== undefined) {
+									return await hostResumeRunner(request, helpersFromHandler);
+								}
+								if (request.subAgentId === INLINE_SUB_AGENT_ID) {
+									return await runInlineSubAgent(request, helpersFromHandler.emitChunk, request);
+								}
+								return configuredSubAgentNotFound(request);
+							},
+							cancelSubAgent: async (
+								request: DelegateSubAgentCancelRequest,
+								helpersFromHandler: DelegateSubAgentRunnerHelpers,
+							) => {
+								if (hostCancelRunner !== undefined) {
+									await hostCancelRunner(request, helpersFromHandler);
+									return;
+								}
+								if (request.subAgentId === INLINE_SUB_AGENT_ID) {
+									await options.runState.cancel(request.childRunId);
+									return;
+								}
+								throw new Error(
+									`No cancellation handler is available for "${request.subAgentId}".`,
+								);
+							},
+						}
+					: {}),
 			});
 
 			if (tool.approval?.required === true) {
@@ -1164,6 +1264,7 @@ export class Agent implements BuiltAgent, AgentBuilder {
 	private createInlineSubAgentRunner(options: {
 		deferredTools: BuiltTool[];
 		modelConfig: ModelConfig;
+		runState: RunStateManager;
 		telemetry?: BuiltTelemetry;
 		toolCallConcurrency?: number;
 		toolSearch?: { topK?: number };
@@ -1171,8 +1272,12 @@ export class Agent implements BuiltAgent, AgentBuilder {
 		inlineSubAgentBlockedTools?: string[];
 		inlineSubAgentModelsByDifficulty?: Partial<Record<SubAgentTaskDifficulty, ModelConfig>>;
 		resolveInlineSubAgentProviderTools?: InlineSubAgentProviderToolsResolver;
-	}): (request: DelegateSubAgentRequest) => Promise<DelegateSubAgentToolOutput> {
-		return async (request) => {
+	}): (
+		request: DelegateSubAgentRequest,
+		onChunk?: (chunk: StreamChunk) => void,
+		resume?: Pick<DelegateSubAgentResumeRequest, 'childRunId' | 'childToolCallId' | 'resumeData'>,
+	) => Promise<DelegateSubAgentToolOutput> {
+		return async (request, onChunk, resume) => {
 			const tools = filterInlineSubAgentTools(options.tools, options.inlineSubAgentBlockedTools);
 			const deferredTools = filterInlineSubAgentTools(
 				options.deferredTools,
@@ -1204,7 +1309,7 @@ export class Agent implements BuiltAgent, AgentBuilder {
 				providerTools: providerTools.length > 0 ? providerTools : undefined,
 				instructionProviderOptions: this.instructionProviderOpts,
 				promptCaching: this.promptCachingConfig,
-				checkpointStorage: this.checkpointStore,
+				runState: options.runState,
 				...(childThinkingConfig !== undefined ? { thinking: childThinkingConfig } : {}),
 				...(this.reasoningLevel !== undefined ? { reasoning: this.reasoningLevel } : {}),
 				...(telemetry !== undefined ? { telemetry } : {}),
@@ -1214,7 +1319,7 @@ export class Agent implements BuiltAgent, AgentBuilder {
 			});
 
 			try {
-				const result = await childRuntime.generate(renderDelegateSubAgentPrompt(request), {
+				const executionOptions: ExecutionOptions = {
 					...(request.parentAbortSignal !== undefined
 						? { abortSignal: request.parentAbortSignal }
 						: {}),
@@ -1222,15 +1327,87 @@ export class Agent implements BuiltAgent, AgentBuilder {
 					...(request.parentExecutionCounter !== undefined
 						? { executionCounter: request.parentExecutionCounter }
 						: {}),
-				});
-				if (result.pendingSuspend !== undefined && result.pendingSuspend.length > 0) {
-					return failedDelegatedChildSuspendOutput(request.taskPath, result.model ?? childModelId);
+				};
+				const resultStream = resume
+					? await childRuntime.resume('stream', resume.resumeData, {
+							...executionOptions,
+							runId: resume.childRunId,
+							toolCallId: resume.childToolCallId,
+						})
+					: await childRuntime.stream(renderDelegateSubAgentPrompt(request), executionOptions);
+
+				let text = '';
+				let model: string | undefined;
+				let usage: TokenUsage | undefined;
+				let finishReason: FinishReason | undefined;
+				let structuredOutput: unknown;
+				let error: unknown;
+				const pendingSuspend: NonNullable<GenerateResult['pendingSuspend']> = [];
+
+				const reader = resultStream.stream.getReader();
+				try {
+					while (true) {
+						const { done, value } = await reader.read();
+						if (done) break;
+						const chunk = value;
+						onChunk?.(chunk);
+						switch (chunk.type) {
+							case 'text-delta':
+								text += chunk.delta;
+								break;
+							case 'tool-call-suspended':
+								pendingSuspend.push({
+									runId: chunk.runId,
+									toolCallId: chunk.toolCallId,
+									toolName: chunk.toolName,
+									input: chunk.input,
+									suspendPayload: chunk.suspendPayload,
+									...(chunk.resumeSchema !== undefined ? { resumeSchema: chunk.resumeSchema } : {}),
+								});
+								break;
+							case 'error':
+								error = chunk.error;
+								break;
+							case 'finish':
+								finishReason = chunk.finishReason;
+								if (chunk.usage !== undefined) usage = chunk.usage;
+								if (chunk.model !== undefined) model = chunk.model;
+								if (chunk.structuredOutput !== undefined) {
+									structuredOutput = chunk.structuredOutput;
+								}
+								break;
+							default:
+								break;
+						}
+					}
+				} finally {
+					reader.releaseLock();
 				}
-				const resultWithModel =
-					result.model === undefined && childModelId !== undefined
-						? { ...result, model: childModelId }
-						: result;
-				return generateResultToDelegateSubAgentOutput(request.taskPath, resultWithModel);
+
+				// The runtime only serializes its message list into state on success
+				// and on suspend, so an errored child falls back to the streamed text.
+				const responseMessages = AgentMessageList.deserialize(
+					resultStream.getState().messageList,
+				).responseDelta();
+				const messages: AgentMessage[] =
+					responseMessages.length > 0
+						? responseMessages
+						: text.trim()
+							? [{ role: 'assistant', content: [{ type: 'text', text }] }]
+							: [];
+
+				const result: GenerateResult = {
+					runId: resultStream.runId,
+					messages,
+					...((model ?? childModelId) ? { model: model ?? childModelId } : {}),
+					...(finishReason !== undefined ? { finishReason } : {}),
+					...(usage !== undefined ? { usage } : {}),
+					...(structuredOutput !== undefined ? { structuredOutput } : {}),
+					...(error !== undefined ? { error } : {}),
+					...(pendingSuspend.length > 0 ? { pendingSuspend } : {}),
+					getState: () => resultStream.getState(),
+				};
+				return generateResultToDelegateSubAgentOutput(request.taskPath, result);
 			} finally {
 				await childRuntime.dispose();
 			}
@@ -1282,29 +1459,10 @@ function resolveInlineSubAgentModelConfig(
 	return mappedModel ?? options.modelConfig;
 }
 
-function modelConfigToId(modelConfig: ModelConfig): string | undefined {
-	if (typeof modelConfig === 'string') return modelConfig;
-	if (typeof modelConfig === 'object' && modelConfig !== null && 'id' in modelConfig) {
-		return typeof modelConfig.id === 'string' ? modelConfig.id : undefined;
-	}
-	if (
-		typeof modelConfig === 'object' &&
-		modelConfig !== null &&
-		'provider' in modelConfig &&
-		'modelId' in modelConfig
-	) {
-		const provider = typeof modelConfig.provider === 'string' ? modelConfig.provider : undefined;
-		const modelId = typeof modelConfig.modelId === 'string' ? modelConfig.modelId : undefined;
-		return provider && modelId ? `${provider}/${modelId}` : undefined;
-	}
-	return undefined;
-}
-
 function modelConfigProvider(modelConfig: ModelConfig): string | undefined {
-	const modelId = modelConfigToId(modelConfig);
-	if (!modelId) return undefined;
-	const slashIndex = modelId.indexOf('/');
-	return slashIndex > 0 ? modelId.slice(0, slashIndex) : undefined;
+	const id = modelConfigToId(modelConfig);
+	if (id === undefined) return undefined;
+	return getProviderPrefix(id) || undefined;
 }
 
 function shouldInheritThinking(

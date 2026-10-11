@@ -6,6 +6,7 @@ import { ProtectedResourceRegistry } from '../protected-resource.registry';
 
 const resourceA: ProtectedResource = {
 	id: 'instance-mcp',
+	surface: 'instance-mcp',
 	getResourceUrl: () => 'https://n8n.example.com/mcp-server/http',
 	getAudiences: () => ['https://n8n.example.com/mcp-server/http', 'mcp-server-api'],
 	scopes: ['tool:listWorkflows', 'tool:getWorkflowDetails'],
@@ -15,6 +16,7 @@ const resourceA: ProtectedResource = {
 
 const resourceB: ProtectedResource = {
 	id: 'workflow-trigger',
+	surface: 'trigger',
 	getResourceUrl: () => 'https://n8n.example.com/webhook/wf-1/mcp',
 	getAudiences: () => ['https://n8n.example.com/webhook/wf-1/mcp'],
 	authorize: async () => true,
@@ -40,6 +42,7 @@ describe('ProtectedResourceRegistry', () => {
 		it('should resolve a resource by any of its declared resource URLs', async () => {
 			const multiUrlResource: ProtectedResource = {
 				id: 'instance-mcp-multi',
+				surface: 'instance-mcp',
 				getResourceUrl: () => 'https://n8n-mcp.example.com/mcp-server/http',
 				getResourceUrls: () => [
 					'https://n8n-mcp.example.com/mcp-server/http',
@@ -88,6 +91,12 @@ describe('ProtectedResourceRegistry', () => {
 			expect(await registry.getByResourcePath('/unknown')).toBeUndefined();
 		});
 
+		it('should match a static resource on the path, ignoring a query component', async () => {
+			// a resource that doesn't use a query selector must not be missed because of one
+			expect(await registry.getByResourcePath('/mcp-server/http?method=GET')).toBe(resourceA);
+			expect(await registry.getByResourcePath('/mcp-server/http/?foo=bar')).toBe(resourceA);
+		});
+
 		it('should resolve the default resource', () => {
 			expect(registry.getDefaultResource()).toBe(resourceA);
 		});
@@ -129,6 +138,30 @@ describe('ProtectedResourceRegistry', () => {
 				'tool:getWorkflowDetails',
 				'workflow:execute',
 			]);
+		});
+	});
+
+	describe('resolvers', () => {
+		it('should hand resolvers the path and the query component separately', async () => {
+			const resolverRegistry = new ProtectedResourceRegistry(mock<Logger>());
+			const resolver = mock<ProtectedResourceResolver>({ id: 'webhook', scopes: [] });
+			resolver.resolveByPath.mockResolvedValue(undefined);
+			resolverRegistry.registerResolver(resolver);
+
+			await resolverRegistry.getByResourcePath('/webhook/orders/?method=GET');
+
+			expect(resolver.resolveByPath).toHaveBeenCalledWith('/webhook/orders', '?method=GET');
+		});
+
+		it('should pass an empty query when the path carries none', async () => {
+			const resolverRegistry = new ProtectedResourceRegistry(mock<Logger>());
+			const resolver = mock<ProtectedResourceResolver>({ id: 'webhook', scopes: [] });
+			resolver.resolveByPath.mockResolvedValue(undefined);
+			resolverRegistry.registerResolver(resolver);
+
+			await resolverRegistry.getByResourcePath('/webhook/orders');
+
+			expect(resolver.resolveByPath).toHaveBeenCalledWith('/webhook/orders', '');
 		});
 	});
 

@@ -498,7 +498,7 @@ export function seededTurnCounters(seededTurns: TranscriptTurn[]): TurnCounter[]
 	});
 }
 
-/** Prepend the seeded prefix's counters to live metrics so a seedThread case's
+/** Prepend the seeded prefix's counters to live metrics so a seeded case's
  *  metrics span the whole conversation (matching the unified transcript). Live
  *  `reachedRunFinishCleanly` is preserved (it describes the evaluated run); an
  *  empty prefix returns metrics deep-equal to the live ones. */
@@ -626,6 +626,29 @@ function extractIdFromRecord(record: Record<string, unknown>, keys: string[]): s
 		}
 	}
 	return undefined;
+}
+
+/** Successful saves in event order. Failed saves can also contain IDs, so
+ * they must not authorize later harness mutations or executions. */
+export function savedWorkflowsFromEvents(
+	events: CapturedEvent[],
+): Array<{ id: string; name: string }> {
+	const names = new Map<string, string>();
+	return extractOutcomeFromEvents(events).toolCalls.flatMap((call) => {
+		if (!WORKFLOW_TOOLS.has(call.toolName)) return [];
+		const result = toResultRecord(call.result);
+		if (result?.success !== true) return [];
+		const id = extractIdFromResult(result, 'workflowId', 'id');
+		if (!id) return [];
+		if (typeof result.workflowName === 'string' && result.workflowName.trim()) {
+			names.set(id, result.workflowName);
+		}
+		return [{ id, name: names.get(id) ?? id }];
+	});
+}
+
+export function lastSavedWorkflowIdFromEvents(events: CapturedEvent[]): string | undefined {
+	return savedWorkflowsFromEvents(events).at(-1)?.id;
 }
 
 function dedupe(arr: string[]): string[] {

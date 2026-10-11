@@ -9,9 +9,9 @@
  * - `start-step` / `finish-step` mark LLM iteration boundaries.
  *
  * The frontend groups deltas by these ids and uses `start-step` / `finish-step`
- * to decide when a new ChatMessage cursor should open. There is no
- * server-minted `messageId` — the FE generates its own UUID per ChatMessage
- * for v-for keys only.
+ * to decide when a new ChatMessage cursor should open. The frontend assigns
+ * display IDs to assistant messages. `execution-started` and `message-steered`
+ * carry canonical input IDs for reconciliation with history.
  *
  * `runId` is included on `ToolSuspendedPayload` and echoed back by the
  * frontend on resume. The SDK stores `runId` on each `PendingToolCall` and
@@ -25,7 +25,7 @@
  *
  */
 
-import type { AgentPersistedMessageContentPart } from './agents';
+import type { AgentPersistedMessageContentPart, AgentPersistedMessageDto } from './agents';
 
 export interface ToolSuspendedPayload {
 	toolCallId: string;
@@ -47,7 +47,46 @@ export interface AgentSseMessage {
 	content: AgentPersistedMessageContentPart[];
 }
 
+/**
+ * Child stream chunks forwarded live while a `delegate_subagent` tool runs.
+ * Structural mirror of `@n8n/agents` `ForwardedChildChunk` (api-types cannot
+ * import from that package).
+ */
+export type ForwardedChildChunkWire =
+	| { type: 'text-delta'; id: string; delta: string }
+	| { type: 'reasoning-start'; id: string }
+	| { type: 'reasoning-delta'; id: string; delta: string }
+	| { type: 'reasoning-end'; id: string }
+	| { type: 'tool-input-start'; toolCallId: string; toolName: string }
+	| {
+			type: 'tool-execution-start';
+			toolCallId: string;
+			toolName: string;
+			startTime: number;
+	  }
+	| {
+			type: 'tool-execution-end';
+			toolCallId: string;
+			toolName: string;
+			isError: boolean;
+			endTime: number;
+	  };
+
 export type AgentSseEvent =
+	| {
+			type: 'message-steered';
+			queueId: string;
+			executionId: string;
+			message: AgentPersistedMessageDto;
+	  }
+	| { type: 'message-queued'; queueId: string; sessionId: string }
+	| {
+			type: 'execution-started';
+			executionId: string;
+			sessionId: string;
+			message?: string;
+			inputMessageIds?: string[];
+	  }
 	| { type: 'start-step' }
 	| { type: 'finish-step' }
 	| { type: 'text-start'; id: string }
@@ -94,6 +133,17 @@ export type AgentSseEvent =
 			canceled?: boolean;
 	  }
 	| { type: 'tool-call-suspended'; payload: ToolSuspendedPayload }
+	| {
+			/**
+			 * Live progress from a delegated child agent. Correlated to the parent
+			 * `delegate_subagent` tool call via `parentToolCallId`. Ephemeral —
+			 * not persisted or replayed from history.
+			 */
+			type: 'subagent-chunk';
+			parentToolCallId: string;
+			taskPath: string;
+			chunk: ForwardedChildChunkWire;
+	  }
 	| { type: 'message'; message: AgentSseMessage }
 	| {
 			/** A warning message from the MCP server when it fails to connect or initialize. */
@@ -102,6 +152,23 @@ export type AgentSseEvent =
 			code?: string;
 			source?: 'mcp';
 			server?: string;
+	  }
+	| {
+			/**
+			 * The run ended. `finishReason` mirrors the runtime finish chunk. A
+			 * `guardrail` stop carries the code of the hook that ended the run.
+			 */
+			type: 'finish';
+			finishReason: string;
+			guardrail?: { code: string };
+	  }
+	| {
+			/**
+			 * Preview chat only. Monthly spend crossed the alert line.
+			 * The run continues.
+			 */
+			type: 'budget-notice';
+			code: 'budget.alert';
 	  }
 	| {
 			type: 'error';

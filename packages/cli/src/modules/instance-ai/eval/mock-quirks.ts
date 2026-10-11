@@ -63,7 +63,7 @@ export const MOCK_QUIRKS: MockQuirk[] = [
 		service: 'Openai',
 		guidance:
 			'OpenAI endpoints commonly seen in workflows:\n' +
-			'  * `POST /v1/responses` (Responses API) → JSON `{ "id": "resp_abc123", "object": "response", "status": "completed", "model": "<from request>", "output": [{ "type": "message", "id": "msg_abc123", "status": "completed", "role": "assistant", "content": [{ "type": "output_text", "text": "<answer>", "annotations": [] }] }], "usage": { "input_tokens": 100, "output_tokens": 50, "total_tokens": 150 } }`. The `output` ARRAY is REQUIRED — consumers read `output[].content[].text` and crash without it. NEVER return `{ "content": ... }` or a chat-completions `choices` shape for this endpoint.\n' +
+			'  * `POST /v1/responses` (Responses API) → JSON `{ "id": "resp_abc123", "object": "response", "status": "completed", "model": "<from request>", "output": [{ "type": "message", "id": "msg_abc123", "status": "completed", "role": "assistant", "content": [{ "type": "output_text", "text": "<answer>", "annotations": [] }] }], "usage": { "input_tokens": 100, "output_tokens": 50, "total_tokens": 150 } }`. The `output` ARRAY is REQUIRED — consumers read `output[].content[].text` and crash without it. NEVER return `{ "content": ... }` or a chat-completions `choices` shape for this endpoint. `text` MUST be a STRING: when the request asks for JSON output (`json_object`/`json_schema` format), the real API returns the JSON **encoded into the string** (e.g. `"{\\"quotes\\":[...]}"`) — never embed a parsed object as `text`; downstream code does `JSON.parse(text)` and gets "[object Object]" otherwise. The same string rule applies to chat-completions `choices[].message.content`.\n' +
 			'  * `POST /v1/audio/transcriptions` and `POST /v1/audio/translations` → JSON `{ "text": "<plausible transcript>", ... }`. The request multipart body has been redacted (you will see `__redacted: "multipart"`); derive the transcript from scenario/node hints when present, otherwise return a short generic English sentence.\n' +
 			'  * `POST /v1/images/generations` → ALWAYS `type: "json"`, NEVER a binary/Buffer response (this endpoint returns a JSON envelope, not raw image bytes — a Buffer crashes the node with "data is not iterable"). Body: `{ "created": <unix>, "data": [ ... ] }` where `data` is an ARRAY of image OBJECTS (never a flat byte array). The per-image shape depends on the request `model`: the `gpt-image-1` family (`gpt-image-1`, `gpt-image-1-mini`) ALWAYS returns base64 and NEVER a url (it does not support `response_format`), so each `data[]` entry MUST be `{ "b64_json": "iVBORw0KGgo", "revised_prompt": "..." }` — never `{ "url": ... }`. For `dall-e-2`/`dall-e-3`, return `{ "url": "https://example.invalid/img.png", "revised_prompt": "..." }` by default, or `{ "b64_json": "iVBORw0KGgo", "revised_prompt": "..." }` when the request body has `response_format: "b64_json"`. Any short placeholder string is fine for `b64_json` — the harness substitutes real decodable image bytes (workflows often pipe generated images into image-processing nodes).\n' +
 			'  * `GET /v1/files/{file_id}/content` → BINARY (`type: "binary"`). Use `contentType` matching the file MIME if known, else `application/octet-stream`. The metadata sibling `GET /v1/files/{file_id}` is JSON.\n' +
@@ -219,6 +219,16 @@ export const MOCK_QUIRKS: MockQuirk[] = [
 		rationale:
 			'The Google Docs node reads responseData.replies[0] unconditionally; a body without a non-empty replies array throws. No quirk existed for Google Docs before (TRUST-309).',
 		addedAt: '2026-07-16',
+	},
+	{
+		service: 'Sheets',
+		hostnames: ['sheets.googleapis.com'],
+		endpoint: 'GET /v4/spreadsheets/*/values/*',
+		guidance:
+			'Google Sheets `GET /v4/spreadsheets/{id}/values/{range}` → `{ "range": "<A1 range>", "majorDimension": "ROWS", "values": [[...], ...] }`. When the range is a whole sheet (e.g. `Sheet1`) or starts at row 1, `values[0]` is the HEADER row with the column names the scenario gives. The n8n Google Sheets node reads whole sheets and takes `values[0]` as the column names, so NEVER drop the header row. Every following row lists its cells in the same column order as the header. Keep each cell exactly as the scenario states it: a date written as text (e.g. `01/12/2026`) stays that text. A blank cell inside a row is `""`; trailing blank cells and trailing blank rows are left out.',
+		rationale:
+			'The node maps each row by the first row of the response. Observed in eval runs: the mock left out the header row, so the first data row became the column names. In another run the mock swapped two columns between rows and rewrote a text date as ISO. Shape per the ValueRange reference: https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets.values#ValueRange',
+		addedAt: '2026-09-30',
 	},
 ];
 

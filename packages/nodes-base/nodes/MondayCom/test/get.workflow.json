@@ -1,111 +1,142 @@
 {
-	"name": "MondayCom boardItem get test",
+	"name": "MondayCom boardItem:get Test",
 	"nodes": [
 		{
 			"parameters": {},
-			"id": "trigger-id",
-			"name": "When clicking \"Execute Workflow\"",
 			"type": "n8n-nodes-base.manualTrigger",
 			"typeVersion": 1,
-			"position": [0, 0]
+			"position": [0, 0],
+			"id": "trigger-1",
+			"name": "When clicking 'Execute workflow'"
 		},
 		{
 			"parameters": {
-				"authentication": "oAuth2",
 				"resource": "boardItem",
 				"operation": "get",
-				"itemId": "123"
+				"itemId": "1234567890"
 			},
-			"id": "monday-node-id",
-			"name": "Monday get",
 			"type": "n8n-nodes-base.mondayCom",
 			"typeVersion": 1,
-			"position": [220, 0],
+			"position": [200, 0],
+			"id": "monday-get-1",
+			"name": "Get Item",
 			"credentials": {
-				"mondayComOAuth2Api": {
-					"id": "credential-id",
-					"name": "Test Credentials"
+				"mondayComApi": {
+					"id": "test-cred-1",
+					"name": "Monday.com Test"
 				}
 			}
 		},
 		{
 			"parameters": {},
-			"id": "noop-id",
-			"name": "Result",
 			"type": "n8n-nodes-base.noOp",
 			"typeVersion": 1,
-			"position": [440, 0]
+			"position": [400, 0],
+			"id": "output-1",
+			"name": "Get Item - Output"
 		}
 	],
+	"connections": {
+		"When clicking 'Execute workflow'": {
+			"main": [
+				[
+					{
+						"node": "Get Item",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Get Item": {
+			"main": [
+				[
+					{
+						"node": "Get Item - Output",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		}
+	},
 	"pinData": {
-		"Result": [
+		"Get Item - Output": [
 			{
 				"json": {
-					"id": "123",
-					"name": "Item Name",
-					"email": "item@test.com",
-					"created_at": "2025-01-01T00:00:00Z",
-					"updated_at": "2025-01-02T00:00:00Z",
+					"id": "1234567890",
+					"name": "Test Item",
+					"created_at": "2026-02-20T10:00:00Z",
 					"state": "active",
-					"board": { "id": "999" },
-					"creator_id": "1",
-					"group": { "id": "group1", "title": "Group", "deleted": false, "archived": false },
 					"column_values": [
 						{
-							"id": "link",
-							"value": "\"10\"",
-							"text": "10",
-							"display_value": "Linked Name",
-							"title": "Link Col",
-							"additional_info": "{\"relation_column\":{\"link\":true},\"displayed_linked_columns\":{\"999\":[\"price\"]}}",
-							"linked_item_ids": ["42"]
+							"id": "status",
+							"value": "{\"index\":1}",
+							"text": "Working on it",
+							"title": "Status",
+							"additional_info": "{}"
+						},
+						{
+							"id": "connect_boards",
+							"value": null,
+							"text": "Related Item 1",
+							"title": "Connected Board",
+							"additional_info": "{}",
+							"display_value": "Related Item 1",
+							"linked_item_ids": ["5566778899"]
+						},
+						{
+							"id": "subtasks_col",
+							"value": null,
+							"text": "Subtask A",
+							"title": "Subitems",
+							"additional_info": "{}",
+							"display_value": "Subtask A"
+						},
+						{
+							"id": "dependency_col",
+							"value": null,
+							"text": "Dep Item 1",
+							"title": "Dependencies",
+							"additional_info": "{}",
+							"display_value": "Dep Item 1",
+							"linked_item_ids": ["4433221100"]
+						},
+						{
+							"id": "mirror_col",
+							"value": null,
+							"text": "Mirrored Value",
+							"title": "Mirror",
+							"additional_info": "{}",
+							"display_value": "Mirrored Value"
 						}
 					],
 					"mappable_column_values": {
-						"link": {
-							"linkedPulseIds": [{ "linkedPulseId": "42" }],
-							"linked_item_ids": ["42"],
-							"display_value": "Linked Name",
-							"text": "Linked Name"
+						"status": {
+							"index": 1,
+							"text": "Working on it"
+						},
+						"connect_boards": {
+							"linked_item_ids": ["5566778899"],
+							"text": "Related Item 1"
+						},
+						"subtasks_col": {
+							"text": "Subtask A",
+							"display_value": "Subtask A"
+						},
+						"dependency_col": {
+							"linked_item_ids": ["4433221100"],
+							"text": "Dep Item 1"
+						},
+						"mirror_col": {
+							"text": "Mirrored Value",
+							"display_value": "Mirrored Value"
 						}
 					},
 					"assets": [],
-					"parent_item": {
-						"id": "P1",
-						"name": "Parent",
-						"created_at": "2024-12-31T00:00:00Z",
-						"updated_at": "2025-01-01T00:00:00Z",
-						"state": "active",
-						"board": { "id": "999" },
-						"creator_id": "1",
-						"group": { "id": "group1" },
-						"column_values": [
-							{
-								"id": "parent_col",
-								"value": "\"val\"",
-								"text": "Parent Text",
-								"title": "Parent Col",
-								"additional_info": "{}"
-							}
-						]
-					},
 					"subitems": []
 				}
 			}
 		]
-	},
-	"connections": {
-		"When clicking \"Execute Workflow\"": {
-			"main": [[{ "node": "Monday get", "type": "main", "index": 0 }]]
-		},
-		"Monday get": {
-			"main": [[{ "node": "Result", "type": "main", "index": 0 }]]
-		}
-	},
-	"active": false,
-	"settings": {},
-	"versionId": "version-id",
-	"id": "workflow-id",
-	"meta": { "instanceId": "instance-id" },
-	"tags": []
+	}
 }

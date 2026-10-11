@@ -4,38 +4,81 @@ import type {
 	StepExecutionRequest,
 	StepExecutionResult,
 } from '@n8n/engine';
-import { ExecuteContext } from 'n8n-core';
-import type {
-	IExecuteData,
-	INode,
-	INodeExecutionData,
-	ITaskDataConnections,
-	WorkflowExecuteMode,
-} from 'n8n-workflow';
+import { UnrecognizedNodeTypeError } from 'n8n-core';
+import type { INodeExecutionData } from 'n8n-workflow';
 import {
-	createRunExecutionData,
+	Expression,
 	isNodeClassInstance,
 	UnexpectedError,
-	Workflow,
+	WAIT_FOR_SUB_EXECUTION,
+	WAIT_INDEFINITELY,
 } from 'n8n-workflow';
 
 import {
 	EngineRequestNotSupportedError,
+	InvalidWaitDateError,
 	MalformedStepConfigError,
 	UnsupportedNodeTypeError,
-	UnknownNodeTypeError,
 	UnsupportedStepTypeError,
+	UnsupportedWaitError,
+	VmExpressionEngineRequiredError,
 } from './errors';
 import { isV1NodeStepConfig } from './guards';
 import { fromStepInputs, toStepOutputs } from './io';
+import { attachResponseHooks } from './v1-response-hooks';
 import type {
-	CreateNodeExecuteContextParams,
 	ExecutableNodeType,
 	NodeRunResult,
 	RunNodeParams,
 	V1NodeStepConfig,
 	V1StepExecutorDeps,
 } from './types';
+import type { DurableWaitExecuteContext } from './v1-adapters';
+import {
+	toAdditionalDataContext,
+	toV1ExecuteContext,
+	toV1Execution,
+	toV1Node,
+	toV1Sources,
+	toV1Workflow,
+} from './v1-adapters';
+
+/**
+ * Turns what the node recorded in `putExecutionToWait` into a wait declaration.
+ * v1 resumes a timed wait by marking the node disabled before it re-enters it,
+ * and a disabled node does not run: it passes its first input through. So the
+ * step emits that input at the deadline, not what the node returned before it
+ * paused.
+ *
+ * A sentinel wait fails the step. Engine v2 has no resume route and no
+ * sub-workflow steps yet. A declaration replaces each failure when its path
+ * exists.
+ */
+function toStepResult(
+	context: DurableWaitExecuteContext,
+	nodeResult: INodeExecutionData[][],
+): StepExecutionResult {
+	const { waitTill } = context.runExecutionData;
+	if (waitTill === undefined) return { outputs: toStepOutputs(nodeResult) };
+	if (waitTill.getTime() === WAIT_INDEFINITELY.getTime()) {
+		throw new UnsupportedWaitError(context.getNode().name, 'a resume request');
+	}
+	if (waitTill.getTime() === WAIT_FOR_SUB_EXECUTION.getTime()) {
+		throw new UnsupportedWaitError(context.getNode().name, 'a sub-execution');
+	}
+	// `toISOString` throws a bare RangeError on an invalid date.
+	if (Number.isNaN(waitTill.getTime())) {
+		throw new InvalidWaitDateError(context.getNode().name);
+	}
+
+	return {
+		wait: {
+			resumeAt: waitTill.toISOString(),
+			outputsAtDeadline: toStepOutputs([context.getInputData()]),
+			acceptsResumeRequest: context.acceptsResumeRequest,
+		},
+	};
+}
 
 /**
  * Runs `v1-node` steps by adapting them to the v1 node runtime.
@@ -48,20 +91,47 @@ export class V1StepExecutor implements IStepExecutor {
 	constructor(private readonly deps: V1StepExecutorDeps) {}
 
 	async execute(request: StepExecutionRequest): Promise<StepExecutionResult> {
+		this.validateExpressionEngine();
 		const stepConfig = this.validateStepConfig(request.node);
 		const nodeType = this.resolveNodeType(stepConfig);
+		const stepData = await this.deps.loadStepData(request.context);
 
-		const nodeExecuteContext = await this.createNodeExecuteContext({
-			nodeId: request.node.id,
-			nodeName: request.node.name,
+		const node = toV1Node(request.node, stepConfig);
+		const execution = toV1Execution(
+			stepData.graph,
+			stepData.outputsByNode,
+			request.node.id,
+			request.context.iteration,
+		);
+		const workflow = toV1Workflow(request.context.workflowId, node, execution, this.deps.nodeTypes);
+
+		const additionalData = await this.deps.additionalDataFactory(
+			toAdditionalDataContext(request.context),
+		);
+		attachResponseHooks(additionalData, request);
+
+		const context = toV1ExecuteContext({
+			node,
+			workflow,
+			execution,
+			source: toV1Sources(stepData.graph).get(node.id) ?? [],
+			additionalData,
 			stepContext: request.context,
-			stepConfig,
 			itemsByConnection: fromStepInputs(request.inputs),
 		});
 
-		const nodeResult = await this.runNode({ nodeType, nodeExecuteContext });
+		return await workflow.expression.withIsolate(async () => {
+			const nodeResult = await this.runNode({ nodeType, context });
+			return toStepResult(context, nodeResult);
+		});
+	}
 
-		return { outputs: toStepOutputs(nodeResult) };
+	private validateExpressionEngine(): void {
+		// Any isolated engine works here — v1 steps only need the pooled
+		// evaluator that initExpressionEngine() sets up; 'legacy' has none.
+		if (Expression.getActiveImplementation() === 'legacy') {
+			throw new VmExpressionEngineRequiredError();
+		}
 	}
 
 	private validateStepConfig({ type, name, config }: GraphNode): V1NodeStepConfig {
@@ -76,71 +146,15 @@ export class V1StepExecutor implements IStepExecutor {
 		typeVersion,
 	}: V1NodeStepConfig): ExecutableNodeType {
 		const nodeType = this.deps.nodeTypes.getByNameAndVersion(typeName, typeVersion);
-		if (!nodeType) throw new UnknownNodeTypeError(typeName);
+
+		if (!nodeType) {
+			const [packageName, name = typeName] = typeName.split('.');
+			throw new UnrecognizedNodeTypeError(packageName, name);
+		}
+
 		if (typeof nodeType.execute !== 'function') throw new UnsupportedNodeTypeError(typeName);
 
 		return nodeType as ExecutableNodeType;
-	}
-
-	private async createNodeExecuteContext({
-		nodeId,
-		nodeName,
-		stepConfig,
-		stepContext: stepCtx,
-		itemsByConnection,
-	}: CreateNodeExecuteContextParams) {
-		const node: INode = {
-			id: nodeId,
-			name: nodeName,
-			type: stepConfig.nodeType,
-			typeVersion: stepConfig.typeVersion,
-			position: [0, 0],
-			parameters: stepConfig.parameters,
-			continueOnFail: stepConfig.continueOnFail,
-		};
-
-		const workflow = new Workflow({
-			id: stepCtx.workflowId,
-			nodes: [node],
-			connections: {},
-			active: false,
-			nodeTypes: this.deps.nodeTypes,
-		});
-
-		const firstInput = itemsByConnection[0] ?? [];
-		const connectionInputData = firstInput.length > 0 ? firstInput : [{ json: {} }];
-		const inputData: ITaskDataConnections = {
-			main: [connectionInputData, ...itemsByConnection.slice(1)],
-		};
-
-		const runExecutionData = createRunExecutionData({
-			startData: {},
-			resultData: { runData: {} },
-			executionData: {
-				contextData: {},
-				nodeExecutionStack: [],
-				metadata: {},
-				waitingExecution: {},
-				waitingExecutionSource: null,
-			},
-		});
-
-		const executeData: IExecuteData = { node, data: inputData, source: null };
-		const mode: WorkflowExecuteMode = stepCtx.mode === 'production' ? 'trigger' : 'manual';
-		const additionalData = await this.deps.additionalDataFactory(stepCtx.executionId);
-
-		return new ExecuteContext(
-			workflow,
-			node,
-			additionalData,
-			mode,
-			runExecutionData,
-			0,
-			connectionInputData,
-			inputData,
-			executeData,
-			[],
-		);
 	}
 
 	/**
@@ -150,21 +164,18 @@ export class V1StepExecutor implements IStepExecutor {
 	 * failure with `continueOnFail` passes the input items through as output.
 	 * A null result yields no output.
 	 */
-	private async runNode({
-		nodeType,
-		nodeExecuteContext,
-	}: RunNodeParams): Promise<INodeExecutionData[][]> {
+	private async runNode({ nodeType, context }: RunNodeParams): Promise<INodeExecutionData[][]> {
 		let result: NodeRunResult;
 		try {
 			const value = isNodeClassInstance(nodeType)
-				? await nodeType.execute(nodeExecuteContext)
-				: await nodeType.execute.call(nodeExecuteContext);
+				? await nodeType.execute(context)
+				: await nodeType.execute.call(context);
 			result = { ok: true, value };
 		} catch (error) {
 			result = { ok: false, error };
 		}
 
-		const { closeFunctions } = nodeExecuteContext;
+		const { closeFunctions } = context;
 		if (closeFunctions.length > 0) {
 			const closeResults = await Promise.allSettled(closeFunctions.map(async (fn) => await fn()));
 			if (result.ok) {
@@ -175,21 +186,49 @@ export class V1StepExecutor implements IStepExecutor {
 					throw rejected.reason instanceof Error
 						? rejected.reason
 						: new UnexpectedError("Error on node's close function", {
-								extra: { nodeName: nodeExecuteContext.getNode().name },
+								extra: { nodeName: context.getNode().name },
 							});
 				}
 			}
 		}
 
 		if (!result.ok) {
-			if (!nodeExecuteContext.continueOnFail()) throw result.error;
-			return [nodeExecuteContext.getInputData()];
+			const description = this.describeNodeError(result.error);
+			try {
+				await context.sendChunk('error', 0, description);
+			} catch {
+				// The node's own error is the one to report. The response channel
+				// already tells the caller when it cannot carry the error chunk.
+			}
+			if (!context.continueOnFail()) throw result.error;
+			return [context.getInputData()];
 		}
 
 		if (result.value === null || result.value === undefined) return [];
 
 		if (Array.isArray(result.value)) return result.value as INodeExecutionData[][];
 
-		throw new EngineRequestNotSupportedError(nodeExecuteContext.getNode().type);
+		throw new EngineRequestNotSupportedError(context.getNode().type);
+	}
+
+	/**
+	 * The text of the error chunk for a failed node. Only a node error's
+	 * `description` goes to the caller, as in v1. The `message` can hold
+	 * request details, so it stays in the logs and the execution data.
+	 * Without a description, the caller gets a generic text, so the chunk
+	 * always has content.
+	 */
+	private describeNodeError(error: unknown): string {
+		if (
+			typeof error === 'object' &&
+			error !== null &&
+			'description' in error &&
+			typeof error.description === 'string' &&
+			error.description !== ''
+		) {
+			return error.description;
+		}
+
+		return 'Node execution failed';
 	}
 }

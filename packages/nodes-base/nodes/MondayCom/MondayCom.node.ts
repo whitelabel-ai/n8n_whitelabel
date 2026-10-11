@@ -26,6 +26,45 @@ interface IGraphqlBody {
 	variables: IDataObject;
 }
 
+/**
+ * Shared `column_values` selection reused across the boardItem read operations.
+ *
+ * Since API version 2025-04 the `value` field returns null for connect board,
+ * dependency, mirror and subtasks columns, so we request the typed fragments
+ * that expose the data instead (`display_value`, `linked_item_ids`, `subitems`).
+ * @see https://developer.monday.com/api-reference/changelog/value-field-now-returns-null-on-connect-boards-dependency-and-subtasks-columns
+ */
+const columnValuesFragment = `column_values {
+	id
+	text
+	type
+	value
+	... on BoardRelationValue {
+		display_value
+		linked_item_ids
+	}
+	... on DependencyValue {
+		display_value
+		linked_item_ids
+	}
+	... on MirrorValue {
+		display_value
+	}
+	... on SubtasksValue {
+		display_value
+		subitems {
+			id
+			name
+		}
+	}
+	column {
+		title
+		archived
+		description
+		settings_str
+	}
+}`;
+
 export const normalizeMondayItem = (item: IDataObject): IDataObject => {
 	const mapColumnValues = (cvs: IDataObject[] | undefined) =>
 		(cvs ?? []).map((cv) => {
@@ -758,81 +797,42 @@ export class MondayCom implements INodeType {
 
 						const body: IGraphqlBody = {
 							query: `query ($itemId: [ID!]){
-                                    items (ids: $itemId) {
-                                        id
-                                        name
-                                        email
-                                        created_at
-                                        updated_at
-                                        state
-                                        board { id }
-                                        creator_id
-                                        group { id title deleted archived }
-                                        column_values {
-                                            id
-                                            text
-                                            value
-                                        column {
-                                                title
-                                                settings_str
-                                            }
-                                            ... on BoardRelationValue {
-                                                linked_item_ids
-                                                display_value
-                                            }
-                                            ... on MirrorValue {
-                                                display_value
-                                            }
-                                        }
-                                        assets { id name url }
-                                        parent_item {
-                                            id
-                                            name
-                                            created_at
-                                            updated_at
-                                            state
-                                            board { id }
-                                            creator_id
-                                            group { id }
-                                            column_values {
-                                                id
-                                                text
-                                                value
-                                                column { title settings_str }
-                                                ... on BoardRelationValue {
-                                                    linked_item_ids
-                                                    display_value
-                                                }
-                                                ... on MirrorValue {
-                                                    display_value
-                                                }
-                                            }
-                                        }
-                                        subitems {
-                                            id
-                                            name
-                                            created_at
-                                            updated_at
-                                            state
-                                            board { id }
-                                            creator_id
-                                            group { id }
-                                            column_values {
-                                                id
-                                                text
-                                                value
-                                                column { title settings_str }
-                                                ... on BoardRelationValue {
-                                                    linked_item_ids
-                                                    display_value
-                                                }
-                                                ... on MirrorValue {
-                                                    display_value
-                                                }
-                                            }
-                                        }
-                                    }
-                                }`,
+									items (ids: $itemId) {
+										id
+										name
+										email
+										created_at
+										updated_at
+										state
+										board { id }
+										creator_id
+										group { id title deleted archived }
+										${columnValuesFragment}
+										assets { id name url }
+										parent_item {
+											id
+											name
+											created_at
+											updated_at
+											state
+											board { id }
+											creator_id
+											group { id }
+											${columnValuesFragment}
+										}
+										subitems {
+											id
+											name
+											created_at
+											updated_at
+											state
+											board { id }
+											creator_id
+											group { id }
+											${columnValuesFragment}
+										}
+									}
+								}`,
 							variables: {
 								itemId: itemIds,
 							},
@@ -857,7 +857,7 @@ export class MondayCom implements INodeType {
                                             id
                                             name
                                             board { id }
-                                            column_values { id text value }
+                                            ${columnValuesFragment}
                                         }
                                     }`,
 								variables: { ids: Array.from(allLinkedIds) },
@@ -940,7 +940,10 @@ export class MondayCom implements INodeType {
 									const lcv = (li.column_values as IDataObject[]) || [];
 									const target = lcv.find((c) => c.id === targetCol);
 									if (!target) continue;
-									let t = (target.text as string | null | undefined) ?? null;
+									let t =
+										(target.text as string | null | undefined) ||
+										(target.display_value as string | null | undefined) ||
+										null;
 									if (!t) {
 										const vRaw = target.value as string | null | undefined;
 										if (typeof vRaw === 'string') {
@@ -975,55 +978,31 @@ export class MondayCom implements INodeType {
 						const returnAll = this.getNodeParameter('returnAll', i);
 
 						const fieldsToReturn = `
-                        {
-                            id
-                            name
-                            email
-                            created_at
-                            updated_at
-                            state
-                            board { id }
-                            creator_id
-                            group { id title deleted archived }
-                            column_values {
-                                id
-                                text
-                                value
-                                column { title settings_str }
-                                ... on BoardRelationValue {
-                                    linked_item_ids
-                                    display_value
-                                }
-                                ... on MirrorValue {
-                                    display_value
-                                }
-                            }
-                            assets { id name url }
-                            subitems {
-                                id
-                                name
-                                created_at
-                                updated_at
-                                state
-                                board { id }
-                                creator_id
-                                group { id }
-                                column_values {
-                                    id
-                                    text
-                                    value
-                                    column { title settings_str }
-                                    ... on BoardRelationValue {
-                                        linked_item_ids
-                                        display_value
-                                    }
-                                    ... on MirrorValue {
-                                        display_value
-                                    }
-                                }
-                            }
-                        }
-                        `;
+						{
+							id
+							name
+							email
+							created_at
+							updated_at
+							state
+							board { id }
+							creator_id
+							group { id title deleted archived }
+							${columnValuesFragment}
+							assets { id name url }
+							subitems {
+								id
+								name
+								created_at
+								updated_at
+								state
+								board { id }
+								creator_id
+								group { id }
+								${columnValuesFragment}
+							}
+						}
+						`;
 
 						const body = {
 							query: `query ($boardId: [ID!], $groupId: [String], $limit: Int) {
@@ -1089,8 +1068,7 @@ export class MondayCom implements INodeType {
 							let linkedItemsById: Record<string, IDataObject> = {};
 							if (allLinkedIds.size > 0) {
 								const q: IGraphqlBody = {
-									query:
-										'query ($ids: [ID!]){ items(ids: $ids){ id name board { id } column_values { id text value } } }',
+									query: `query ($ids: [ID!]){ items(ids: $ids){ id name board { id } ${columnValuesFragment} } }`,
 									variables: { ids: Array.from(allLinkedIds) },
 								};
 								const linkedResp = await mondayComApiRequest.call(this, q);
@@ -1189,7 +1167,10 @@ export class MondayCom implements INodeType {
 										const lcv = (li.column_values as IDataObject[]) || [];
 										const target = lcv.find((c) => c.id === targetCol);
 										if (!target) continue;
-										let t = (target.text as string | null | undefined) ?? null;
+										let t =
+											(target.text as string | null | undefined) ||
+											(target.display_value as string | null | undefined) ||
+											null;
 										if (!t) {
 											const vRaw = target.value as string | null | undefined;
 											if (typeof vRaw === 'string') {
@@ -1229,53 +1210,29 @@ export class MondayCom implements INodeType {
 						const returnAll = this.getNodeParameter('returnAll', i);
 
 						const fieldsToReturn = `{
-                            id
-                            name
-                            email
-                            created_at
-                            updated_at
-                            state
-                            board { id }
-                            creator_id
-                            group { id title deleted archived }
-                            column_values {
-                                id
-                                text
-                                value
-                                column { title settings_str }
-                                ... on BoardRelationValue {
-                                    linked_item_ids
-                                    display_value
-                                }
-                                ... on MirrorValue {
-                                    display_value
-                                }
-                            }
-                            assets { id name url }
-                            subitems {
-                                id
-                                name
-                                created_at
-                                updated_at
-                                state
-                                board { id }
-                                creator_id
-                                group { id }
-                                column_values {
-                                    id
-                                    text
-                                    value
-                                    column { title settings_str }
-                                    ... on BoardRelationValue {
-                                        linked_item_ids
-                                        display_value
-                                    }
-                                    ... on MirrorValue {
-                                        display_value
-                                    }
-                                }
-                            }
-                        }`;
+							id
+							name
+							email
+							created_at
+							updated_at
+							state
+							board { id }
+							creator_id
+							group { id title deleted archived }
+							${columnValuesFragment}
+							assets { id name url }
+							subitems {
+								id
+								name
+								created_at
+								updated_at
+								state
+								board { id }
+								creator_id
+								group { id }
+								${columnValuesFragment}
+							}
+						}`;
 						const body = {
 							query: `query ($boardId: ID!, $columnId: String!, $columnValue: String!, $limit: Int) {
 								items_page_by_column_values(
@@ -1340,8 +1297,7 @@ export class MondayCom implements INodeType {
 							let linkedItemsById: Record<string, IDataObject> = {};
 							if (allLinkedIds.size > 0) {
 								const q: IGraphqlBody = {
-									query:
-										'query ($ids: [ID!]){ items(ids: $ids){ id name board { id } column_values { id text value } } }',
+									query: `query ($ids: [ID!]){ items(ids: $ids){ id name board { id } ${columnValuesFragment} } }`,
 									variables: { ids: Array.from(allLinkedIds) },
 								};
 								const linkedResp = await mondayComApiRequest.call(this, q);
@@ -1366,18 +1322,17 @@ export class MondayCom implements INodeType {
 									const linkedIds = ((cv.linked_item_ids as string[]) || []).map((id) =>
 										String(id),
 									);
-									if (
-										(cv.text === null || cv.text === undefined || cv.text === '') &&
-										linkedIds.length > 0
-									) {
-										const names = linkedIds
-											.map((id) =>
-												linkedItemsById[id] ? String(linkedItemsById[id].name ?? '') : '',
-											)
-											.filter((s) => s && s !== '');
+									if (cv.text === null || cv.text === undefined || cv.text === '') {
 										const display = (cv.display_value as string | undefined) || undefined;
 										if (display && display.trim() !== '') cv.text = display;
-										else if (names.length > 0) cv.text = names.join(', ');
+										else if (linkedIds.length > 0) {
+											const names = linkedIds
+												.map((id) =>
+													linkedItemsById[id] ? String(linkedItemsById[id].name ?? '') : '',
+												)
+												.filter((s) => s && s !== '');
+											if (names.length > 0) cv.text = names.join(', ');
+										}
 									}
 									const cur = mappables[cv.id as string] as IDataObject | undefined;
 									if (cur && typeof cur === 'object') {
@@ -1410,7 +1365,13 @@ export class MondayCom implements INodeType {
 													const obj = JSON.parse(vRel) as IDataObject;
 													const lp = (obj.linkedPulseIds as IDataObject[]) || [];
 													for (const p of lp) {
-														const id = String((p as IDataObject).linkedPulseId);
+														const lpIdRaw = (p as IDataObject).linkedPulseId as unknown;
+														const id =
+															typeof lpIdRaw === 'string'
+																? lpIdRaw
+																: typeof lpIdRaw === 'number'
+																	? String(lpIdRaw)
+																	: '';
 														if (id) specific.push(id);
 													}
 												} catch {}
@@ -1435,7 +1396,10 @@ export class MondayCom implements INodeType {
 										const lcv = (li.column_values as IDataObject[]) || [];
 										const target = lcv.find((c) => c.id === targetCol);
 										if (!target) continue;
-										let t = (target.text as string | null | undefined) ?? null;
+										let t =
+											(target.text as string | null | undefined) ||
+											(target.display_value as string | null | undefined) ||
+											null;
 										if (!t) {
 											const vRaw = target.value as string | null | undefined;
 											if (typeof vRaw === 'string') {

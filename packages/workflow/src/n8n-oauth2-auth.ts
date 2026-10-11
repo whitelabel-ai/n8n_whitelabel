@@ -1,5 +1,33 @@
+import { recordConsumedAuth } from './auth-redaction';
 import { UnexpectedError } from './errors';
-import type { IWebhookFunctions } from './interfaces';
+import type { IUser, IWebhookFunctions } from './interfaces';
+import { n8nBrowserOAuth2Flow } from './n8n-browser-oauth2-flow';
+
+/**
+ * How a tokenless request is handled:
+ * - `auto`: redirect a browser navigation, 401 everything else.
+ * - `browser`: always redirect a GET, skipping the navigation heuristic.
+ * - `bearer`: never redirect, always 401; the resource is not first-party either,
+ *   so the AS refuses its URL as a virtual client too.
+ */
+export type N8nOAuth2BrowserFlowMode = 'auto' | 'browser' | 'bearer';
+
+/**
+ * Webhook node `typeVersion` from which an unset `oauthClient` defaults to `auto`.
+ * Below it the option didn't exist, so those workflows keep bearer-only on upgrade.
+ */
+export const WEBHOOK_OAUTH_CLIENT_DEFAULT_VERSION = 2.2;
+
+/**
+ * Explicit value wins; unset resolves by node version. Shared by the Webhook node
+ * (runtime redirect) and its resolvers (static `isFirstParty`) so they can't diverge.
+ */
+export function resolveOAuthClientMode(
+	oauthClient: N8nOAuth2BrowserFlowMode | undefined,
+	typeVersion: number,
+): N8nOAuth2BrowserFlowMode {
+	return oauthClient ?? (typeVersion >= WEBHOOK_OAUTH_CLIENT_DEFAULT_VERSION ? 'auto' : 'bearer');
+}
 
 function trimTrailingSlash(url: string): string {
 	return url.endsWith('/') ? url.slice(0, -1) : url;
@@ -35,7 +63,8 @@ function sendUnauthorizedResponse(
  * and the MCP trigger — both expose it as the `n8nOAuth2` authentication mode.
  *
  * On success returns the validated `token` and `resource` URL, which the caller
- * passes to `context.establishTriggerIdentity` to run the workflow as that user.
+ * passes to `context.establishTriggerIdentity` to run the workflow as that user,
+ * plus the resolved `user` for triggers that surface the caller in their output.
  * When the token is missing or invalid the response is written here (401/403/503,
  * advertising the OAuth protected-resource metadata URL in `WWW-Authenticate`) and
  * `'handled'` is returned, so the request never reaches workflow execution.
@@ -44,33 +73,56 @@ function sendUnauthorizedResponse(
  * header (e.g. `n8n Webhook` vs `n8n MCP Server`); everything else — token
  * parsing, protected-resource-metadata URL, error-code mapping — is identical and
  * kept here so the two auth modes can't drift.
+ *
+ * With `browserFlow` set to anything but `'bearer'`, a tokenless browser navigation
+ * is redirected through this instance's own AS instead (see {@link n8nBrowserOAuth2Flow}).
  */
 export const n8nOAuth2Auth = async (
 	context: IWebhookFunctions,
-	options: { realm: string },
+	options: { realm: string; method?: string; browserFlow?: N8nOAuth2BrowserFlowMode },
 ): Promise<
 	| {
 			status: 'ok';
 			token: string;
 			resource: string;
+			user: IUser;
 	  }
 	| 'handled'
 > => {
-	const webhookUrl = context.getNodeWebhookUrl('default');
+	const webhookUrl = context.getWebhookResourceUrl('default');
 	if (!webhookUrl) {
 		throw new UnexpectedError('Webhook URL is not available');
 	}
 
-	const resourceUrl = trimTrailingSlash(webhookUrl);
+	// One webhook path can host several disjoint-method triggers, so the method being
+	// served selects which one a resource URL names. It has to be carried on both the
+	// token audience (`resourceUrl`) and the metadata URL advertised in
+	// `WWW-Authenticate` (`prmUrl`), keeping mint and verify consistent. Omitted for
+	// MCP, which is always POST and needs no selector.
+	const resourceUrl =
+		trimTrailingSlash(webhookUrl) +
+		(options.method ? `?method=${options.method.toUpperCase()}` : '');
 
 	const u = new URL(resourceUrl);
-	const prmUrl = `${u.origin}/.well-known/oauth-protected-resource${u.pathname}`;
+	const prmUrl = `${u.origin}/.well-known/oauth-protected-resource${u.pathname}${u.search}`;
 
 	const resp = context.getResponseObject();
 	const req = context.getRequestObject();
 
 	const token = getBearerToken(req.headers.authorization);
 	if (!token) {
+		if (options.browserFlow && options.browserFlow !== 'bearer') {
+			const outcome = await n8nBrowserOAuth2Flow(
+				context,
+				resourceUrl,
+				options.browserFlow === 'browser',
+			);
+			if (outcome === 'handled') return 'handled';
+			if (outcome !== 'not-applicable') {
+				recordConsumedAuth(req, ['cookie']);
+				return { status: 'ok', token: outcome.token, resource: resourceUrl, user: outcome.user };
+			}
+		}
 		sendUnauthorizedResponse(resp, 401, prmUrl, options.realm);
 		return 'handled';
 	}
@@ -87,9 +139,12 @@ export const n8nOAuth2Auth = async (
 		return 'handled';
 	}
 
+	recordConsumedAuth(req, ['authorization']);
+
 	return {
 		status: 'ok',
 		token,
 		resource: resourceUrl,
+		user: validationResult.user,
 	};
 };

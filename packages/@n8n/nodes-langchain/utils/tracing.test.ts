@@ -1,3 +1,4 @@
+import type { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import type { CallbackManager } from '@langchain/core/callbacks/manager';
 import type { IExecuteFunctions, ISupplyDataFunctions } from 'n8n-workflow';
 import { mock } from 'vitest-mock-extended';
@@ -67,6 +68,50 @@ describe('getTracingConfig', () => {
 			const result = getTracingConfig(mockContext);
 
 			expect(result.callbacks).toBeUndefined();
+		});
+
+		it('should copy the parent callback manager with additionalCallbacks', () => {
+			const handler = mock<BaseCallbackHandler>();
+			const copiedManager = mock<CallbackManager>();
+			const mockCallbackManager = mock<CallbackManager>();
+			mockCallbackManager.copy.mockReturnValue(copiedManager);
+			const mockContext = mock<IExecuteFunctions>();
+			mockContext.getWorkflow.mockReturnValue(mockWorkflow);
+			mockContext.getNode.mockReturnValue(mockNode as ReturnType<IExecuteFunctions['getNode']>);
+			mockContext.getExecutionId.mockReturnValue('exec-456');
+			mockContext.getParentCallbackManager.mockReturnValue(mockCallbackManager);
+
+			const result = getTracingConfig(mockContext, { additionalCallbacks: [handler] });
+
+			expect(mockCallbackManager.copy).toHaveBeenCalledWith([handler]);
+			expect(result.callbacks).toBe(copiedManager);
+		});
+
+		it('should use additionalCallbacks as-is when there is no parent callback manager', () => {
+			const handler = mock<BaseCallbackHandler>();
+			const mockContext = mock<IExecuteFunctions>();
+			mockContext.getWorkflow.mockReturnValue(mockWorkflow);
+			mockContext.getNode.mockReturnValue(mockNode as ReturnType<IExecuteFunctions['getNode']>);
+			mockContext.getExecutionId.mockReturnValue('exec-456');
+			mockContext.getParentCallbackManager.mockReturnValue(undefined);
+
+			const result = getTracingConfig(mockContext, { additionalCallbacks: [handler] });
+
+			expect(result.callbacks).toEqual([handler]);
+		});
+
+		it('should keep the parent callback manager when additionalCallbacks is empty', () => {
+			const mockCallbackManager = mock<CallbackManager>();
+			const mockContext = mock<IExecuteFunctions>();
+			mockContext.getWorkflow.mockReturnValue(mockWorkflow);
+			mockContext.getNode.mockReturnValue(mockNode as ReturnType<IExecuteFunctions['getNode']>);
+			mockContext.getExecutionId.mockReturnValue('exec-456');
+			mockContext.getParentCallbackManager.mockReturnValue(mockCallbackManager);
+
+			const result = getTracingConfig(mockContext, { additionalCallbacks: [] });
+
+			expect(mockCallbackManager.copy).not.toHaveBeenCalled();
+			expect(result.callbacks).toBe(mockCallbackManager);
 		});
 
 		it('should merge additionalMetadata when provided', () => {

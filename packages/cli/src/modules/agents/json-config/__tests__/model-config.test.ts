@@ -8,6 +8,26 @@ import {
 } from '../model-config';
 
 describe('resolveCredentialAwareModelConfig', () => {
+	// AGENT-1182: the credential URL serves a different API from the native gateway SDK.
+	it.each(['https://ai-gateway.vercel.sh/v1', 'https://ai-gateway.vercel.sh/v1/'])(
+		'uses the native Vercel SDK endpoint for the standard credential URL %s',
+		async (url) => {
+			const credentialProvider = mock<CredentialProvider>();
+			credentialProvider.resolve.mockResolvedValue({ apiKey: 'gateway-key', url });
+
+			const result = await resolveCredentialAwareModelConfig(
+				'vercel/anthropic/claude-sonnet-5.5',
+				'cred-vercel',
+				credentialProvider,
+			);
+
+			expect(result).toEqual({
+				id: 'vercel/anthropic/claude-sonnet-5.5',
+				apiKey: 'gateway-key',
+			});
+		},
+	);
+
 	it('resolves a real credential via the credential provider (unchanged path)', async () => {
 		const credentialProvider = mock<CredentialProvider>();
 		credentialProvider.resolve.mockResolvedValue({
@@ -48,19 +68,21 @@ describe('resolveCredentialAwareModelConfig', () => {
 			id: 'openai/gpt-5',
 			apiKey: 'gateway-jwt',
 			baseURL: 'https://gw.example/v1/gateway/openai/v1',
+			// The gateway serves OpenAI's Responses API; without this the model
+			// factory infers /chat/completions from the baseURL.
+			apiStyle: 'responses',
 		});
 	});
 
-	it('falls through to resolve() for the managed tag when the provider has no gateway capability', async () => {
-		const resolve = vi.fn().mockResolvedValue({ apiKey: 'x' });
+	it('throws for the managed tag when the provider cannot mint gateway credentials', async () => {
+		// Resolving the tag as an ordinary credential id would surface as a confusing
+		// "credential not found" instead of naming the real problem.
+		const resolve = vi.fn();
 		const credentialProvider = { resolve } as unknown as CredentialProvider;
 
-		await resolveCredentialAwareModelConfig(
-			'openai/gpt-5',
-			AI_GATEWAY_MANAGED_TAG,
-			credentialProvider,
-		);
-
-		expect(resolve).toHaveBeenCalledWith(AI_GATEWAY_MANAGED_TAG);
+		await expect(
+			resolveCredentialAwareModelConfig('openai/gpt-5', AI_GATEWAY_MANAGED_TAG, credentialProvider),
+		).rejects.toThrow('cannot resolve Gateway credits');
+		expect(resolve).not.toHaveBeenCalled();
 	});
 });

@@ -23,6 +23,7 @@ import type {
 	IWorkflowExecutionDataProcess,
 	IExecutionContext,
 	WorkflowExecutionSource,
+	ExecutionStorageLocation,
 } from 'n8n-workflow';
 import type PCancelable from 'p-cancelable';
 
@@ -141,6 +142,8 @@ export interface ResumableExecution {
 	executionId: string;
 	/** `waiting` for a row being resumed, `new` for one enqueued before a restart. */
 	expectedStatus: Extract<ExecutionStatus, 'new' | 'waiting'>;
+	/** Store recorded on the row. A resume keeps writing there, whatever the configured mode. */
+	storedAt?: ExecutionStorageLocation;
 }
 
 export interface IExecutingWorkflowData {
@@ -153,6 +156,7 @@ export interface IExecutingWorkflowData {
 	responsePromise?: IDeferredPromise<IExecuteResponsePromiseData>;
 	workflowExecution?: PCancelable<IRun>;
 	status: ExecutionStatus;
+	isQueueJob?: boolean;
 }
 
 export interface IActiveDirectorySettings {
@@ -211,9 +215,17 @@ export interface IExecutionTrackProperties extends ITelemetryTrackProperties {
 
 export interface IAgentExecutionTrackProperties extends ITelemetryTrackProperties {
 	agent_id: string;
-	/** n8n user ID, present only when the agent run has direct n8n user context. */
+	/**
+	 * n8n user ID, present only when the agent run has direct n8n user context —
+	 * so in-app chat and manual task runs, but never chat integrations or cron.
+	 */
 	user_id?: string;
-	/** Fresh user turns only. Resume continuations do not increment this count. */
+	run_type: AgentRunTelemetryType;
+	source?: string;
+	/**
+	 * Fresh user turns only. Resume continuations and delegated child runs do not
+	 * increment this count.
+	 */
 	message_count?: number;
 	/** AI SDK usage from agent, title, memory generation, and embedding calls. */
 	token_count?: number;
@@ -243,15 +255,23 @@ export interface IAgentConfigurationTelemetryProperties {
 
 export interface IAgentTurnFinishedTrackProperties extends ITelemetryTrackProperties {
 	agent_id: string;
+	user_id?: string;
 	/** Internal aggregation key only. This must never be emitted to telemetry. */
 	thread_id: string;
 	run_type: AgentRunTelemetryType;
+	source?: string;
 	/** Absent for saved agents; 'inline' for node-embedded agent definitions. */
 	agent_type?: 'inline';
 	turn_status: AgentTurnTelemetryStatus;
 	configuration: IAgentConfigurationTelemetryProperties;
 	latency_ms: number;
 	cost: number;
+	/**
+	 * Tokens for this turn only, from the same recorded usage as `cost` — so the
+	 * two reconcile. Narrower than the token count on `Agent execution count`,
+	 * which also covers LLM calls belonging to no turn.
+	 */
+	token_count: number;
 	tool_call_count: number;
 }
 
