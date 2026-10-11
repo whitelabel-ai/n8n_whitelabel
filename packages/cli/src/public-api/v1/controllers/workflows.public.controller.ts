@@ -15,6 +15,7 @@ import {
 	UpdateWorkflowQueryDto,
 	WorkflowListPublicDto,
 	WorkflowPublicDto,
+	WorkflowReadPublicDto,
 	WorkflowPublishBlockedErrorPublicDto,
 	WorkflowPublishForbiddenErrorPublicDto,
 	WorkflowPublishPublicDto,
@@ -128,17 +129,6 @@ function toPublicSharedWorkflow(sharedWorkflow: SharedWorkflow) {
 		workflowId: sharedWorkflow.workflowId,
 		projectId: sharedWorkflow.projectId,
 		project: toPublicProject(sharedWorkflow.project),
-		createdAt: sharedWorkflow.createdAt.toISOString(),
-		updatedAt: sharedWorkflow.updatedAt.toISOString(),
-	};
-}
-
-/** List rows come back without the joined project, so they map a share row without one. */
-function toPublicListSharedWorkflow(sharedWorkflow: SharedWorkflow) {
-	return {
-		role: sharedWorkflow.role,
-		workflowId: sharedWorkflow.workflowId,
-		projectId: sharedWorkflow.projectId,
 		createdAt: sharedWorkflow.createdAt.toISOString(),
 		updatedAt: sharedWorkflow.updatedAt.toISOString(),
 	};
@@ -260,12 +250,15 @@ export class WorkflowsPublicController {
 					active: query.active,
 					tagNames: query.tags ? parseTagNames(query.tags) : undefined,
 					projectId: query.projectId,
+					folderId: query.folderId,
 				},
 				offset,
 				limit,
 				includePinnedData: !query.excludePinnedData,
 				includeTags: this.workflowTagsEnabled,
 				includeActiveVersion: true,
+				includeProjects: true,
+				includeParentFolder: true,
 			},
 		);
 
@@ -286,6 +279,7 @@ export class WorkflowsPublicController {
 				isArchived: workflow.isArchived,
 				versionId: workflow.versionId,
 				triggerCount: workflow.triggerCount,
+				parentFolderId: workflow.parentFolder?.id ?? null,
 				nodes: workflow.nodes,
 				connections: workflow.connections,
 				nodeGroups: workflow.nodeGroups,
@@ -294,7 +288,7 @@ export class WorkflowsPublicController {
 				meta: toPublicJson(workflow.meta),
 				...(query.excludePinnedData ? {} : { pinData: toPublicJson(workflow.pinData) }),
 				...(workflow.tags ? { tags: workflow.tags.map(toPublicTag) } : {}),
-				shared: workflow.shared.map(toPublicListSharedWorkflow),
+				shared: workflow.shared.map(toPublicSharedWorkflow),
 				activeVersion: workflow.activeVersion
 					? toPublicActiveVersionWithoutHistory(workflow.activeVersion)
 					: null,
@@ -343,20 +337,21 @@ export class WorkflowsPublicController {
 	@ApiSummary('Retrieve a workflow')
 	@ApiDescription('Retrieve a workflow.')
 	@ApiTags(['Workflow'])
-	@ApiResponse(200, WorkflowPublicDto)
+	@ApiResponse(200, WorkflowReadPublicDto)
 	@ApiErrorResponse(404)
 	async getWorkflow(
 		req: AuthenticatedRequest,
 		_res: Response,
 		@Param('workflowId', workflowIdParamSchema) workflowId: string,
 		@Query query: GetWorkflowQueryDto,
-	): Promise<WorkflowPublicDto> {
+	): Promise<WorkflowReadPublicDto> {
 		const workflow = await this.workflowFinderService.findWorkflowForUser(
 			workflowId,
 			req.user,
 			['workflow:read'],
 			{
 				includeTags: this.workflowTagsEnabled,
+				includeParentFolder: true,
 				includeActiveVersion: true,
 			},
 		);
@@ -370,7 +365,11 @@ export class WorkflowsPublicController {
 			publicApi: true,
 		});
 
-		return this.toWorkflowPublicDto(workflow, { excludePinnedData: query.excludePinnedData });
+		return {
+			...this.toWorkflowPublicDto(workflow, { excludePinnedData: query.excludePinnedData }),
+			parentFolderId: workflow.parentFolder?.id ?? null,
+			parentFolder: workflow.parentFolder ? toPublicFolder(workflow.parentFolder) : null,
+		};
 	}
 
 	@Put('/:workflowId')

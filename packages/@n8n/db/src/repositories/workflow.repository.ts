@@ -1641,6 +1641,9 @@ export class WorkflowRepository extends BaseRepository<WorkflowEntity> {
 			'project.name',
 			'project.type',
 			'project.icon',
+			'project.description',
+			'project.customTelemetryTags',
+			'project.creatorId',
 			'project.createdAt',
 			'project.updatedAt',
 		]);

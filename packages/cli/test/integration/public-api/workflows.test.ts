@@ -8,6 +8,7 @@ import {
 	createActiveWorkflow,
 	createWorkflowWithHistory,
 	linkUserToProject,
+	shareWorkflowWithProjects,
 	shareWorkflowWithUsers,
 } from '@n8n/backend-test-utils';
 import { GlobalConfig, NodesConfig } from '@n8n/config';
@@ -188,6 +189,131 @@ describe('GET /workflows', () => {
 	test('should fail due to missing API Key', testWithAPIKey('get', '/workflows', null));
 
 	test('should fail due to invalid API Key', testWithAPIKey('get', '/workflows', 'abcXYZ'));
+
+	describe('folder data', () => {
+		test('should return parentFolderId and the project of each share', async () => {
+			const folder = await createFolder(memberPersonalProject, { name: 'Listed Folder' });
+			const inFolder = await createWorkflowWithHistory({ parentFolder: folder }, member);
+			const atRoot = await createWorkflowWithHistory({}, member);
+
+			const response = await authMemberAgent.get('/workflows');
+
+			expect(response.statusCode).toBe(200);
+			const byId = new Map<string, any>(response.body.data.map((item: any) => [item.id, item]));
+			expect(byId.get(inFolder.id).parentFolderId).toBe(folder.id);
+			expect(byId.get(atRoot.id).parentFolderId).toBeNull();
+			expect(byId.get(inFolder.id).shared[0].project.id).toBe(memberPersonalProject.id);
+			expect(byId.get(inFolder.id).shared[0].project.name).toBe(memberPersonalProject.name);
+			expect(byId.get(inFolder.id).shared[0].project.type).toBe('personal');
+		});
+
+		test('should filter by folderId including workflows in subfolders', async () => {
+			const parent = await createFolder(memberPersonalProject, { name: 'Parent' });
+			const child = await createFolder(memberPersonalProject, {
+				name: 'Child',
+				parentFolder: parent,
+			});
+			const other = await createFolder(memberPersonalProject, { name: 'Other' });
+			const inParent = await createWorkflowWithHistory({ parentFolder: parent }, member);
+			const inChild = await createWorkflowWithHistory({ parentFolder: child }, member);
+			await createWorkflowWithHistory({ parentFolder: other }, member);
+			await createWorkflowWithHistory({}, member);
+
+			const response = await authMemberAgent.get(`/workflows?folderId=${parent.id}`);
+
+			expect(response.statusCode).toBe(200);
+			expect(response.body.data.map((item: { id: string }) => item.id).sort()).toEqual(
+				[inParent.id, inChild.id].sort(),
+			);
+			const childItem = response.body.data.find((item: { id: string }) => item.id === inChild.id);
+			expect(childItem.parentFolderId).toBe(child.id);
+		});
+
+		describe('with several projects', () => {
+			const createTeamProjects = async () => {
+				license.setQuota('quota:maxTeamProjects', -1);
+				const projectService = Container.get(ProjectService);
+				const projectA = await projectService.createTeamProject(member, { name: 'Project A' });
+				const projectB = await projectService.createTeamProject(member, { name: 'Project B' });
+				return { projectA, projectB };
+			};
+
+			test('should return every share row with its project', async () => {
+				const { projectA, projectB } = await createTeamProjects();
+				const workflow = await createWorkflowWithHistory({}, projectA);
+				await shareWorkflowWithProjects(workflow, [{ project: projectB }]);
+
+				const listResponse = await authMemberAgent.get('/workflows');
+				const getResponse = await authMemberAgent.get(`/workflows/${workflow.id}`);
+
+				expect(listResponse.statusCode).toBe(200);
+				expect(getResponse.statusCode).toBe(200);
+				const listed = listResponse.body.data.find(
+					(item: { id: string }) => item.id === workflow.id,
+				);
+				for (const shared of [listed.shared, getResponse.body.shared]) {
+					expect(shared).toHaveLength(2);
+					expect(
+						shared.map((row: any) => [
+							row.projectId,
+							row.project.id,
+							row.project.name,
+							row.project.type,
+						]),
+					).toEqual(
+						expect.arrayContaining([
+							[projectA.id, projectA.id, 'Project A', 'team'],
+							[projectB.id, projectB.id, 'Project B', 'team'],
+						]),
+					);
+				}
+			});
+
+			test('should return only the share row of the project filtered by projectId', async () => {
+				const { projectA, projectB } = await createTeamProjects();
+				const workflow = await createWorkflowWithHistory({}, projectA);
+				await shareWorkflowWithProjects(workflow, [{ project: projectB }]);
+
+				// Current behavior: the project filter also narrows the joined share rows.
+				const response = await authMemberAgent.get(`/workflows?projectId=${projectB.id}`);
+
+				expect(response.statusCode).toBe(200);
+				expect(response.body.data).toHaveLength(1);
+				expect(response.body.data[0].shared.map((row: any) => row.projectId)).toEqual([
+					projectB.id,
+				]);
+			});
+
+			test('should return no workflows for a folder in a project the caller cannot read', async () => {
+				license.setQuota('quota:maxTeamProjects', -1);
+				const hiddenProject = await Container.get(ProjectService).createTeamProject(owner, {
+					name: 'Hidden',
+				});
+				const hiddenFolder = await createFolder(hiddenProject, { name: 'Hidden Folder' });
+				await createWorkflowWithHistory({ parentFolder: hiddenFolder }, hiddenProject);
+
+				const response = await authMemberAgent.get(`/workflows?folderId=${hiddenFolder.id}`);
+
+				expect(response.statusCode).toBe(200);
+				expect(response.body.data).toEqual([]);
+			});
+		});
+
+		test('should return an archived workflow in a folder with its parentFolderId', async () => {
+			const folder = await createFolder(memberPersonalProject, { name: 'Archive Folder' });
+			const workflow = await createWorkflowWithHistory(
+				{ parentFolder: folder, isArchived: true },
+				member,
+			);
+
+			const response = await authMemberAgent.get('/workflows');
+
+			expect(response.statusCode).toBe(200);
+			const item = response.body.data.find((entry: { id: string }) => entry.id === workflow.id);
+			expect(item.isArchived).toBe(true);
+			expect(item.parentFolderId).toBe(folder.id);
+		});
+	});
 
 	test('should return all owned workflows', async () => {
 		await Promise.all([
@@ -798,16 +924,15 @@ describe('GET /workflows', () => {
 		]);
 	});
 
-	test('should return share rows without the owning project', async () => {
+	test('should return share rows with the owning project', async () => {
 		await createWorkflowWithHistory({}, member);
 
 		const response = await authMemberAgent.get('/workflows');
 
 		expect(response.statusCode).toBe(200);
-		// `shared[].project` is deliberately absent: callers that need the home
-		// project derive it themselves, and this endpoint has never returned it.
 		expect(Object.keys(response.body.data[0].shared[0]).sort()).toEqual([
 			'createdAt',
+			'project',
 			'projectId',
 			'role',
 			'updatedAt',
@@ -860,6 +985,37 @@ describe('GET /workflows/:id', () => {
 	test('should fail due to non-existing workflow', async () => {
 		const response = await authOwnerAgent.get('/workflows/2');
 		expect(response.statusCode).toBe(404);
+	});
+
+	test('should return parentFolderId and parentFolder', async () => {
+		const parent = await createFolder(memberPersonalProject, { name: 'Parent' });
+		const child = await createFolder(memberPersonalProject, {
+			name: 'Child',
+			parentFolder: parent,
+		});
+		const workflow = await createWorkflowWithHistory({ parentFolder: child }, member);
+
+		const response = await authMemberAgent.get(`/workflows/${workflow.id}`);
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.parentFolderId).toBe(child.id);
+		expect(response.body.parentFolder).toEqual({
+			id: child.id,
+			name: 'Child',
+			parentFolderId: parent.id,
+			createdAt: child.createdAt.toISOString(),
+			updatedAt: child.updatedAt.toISOString(),
+		});
+	});
+
+	test('should return null parentFolderId and parentFolder at the project root', async () => {
+		const workflow = await createWorkflowWithHistory({}, member);
+
+		const response = await authMemberAgent.get(`/workflows/${workflow.id}`);
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.parentFolderId).toBeNull();
+		expect(response.body.parentFolder).toBeNull();
 	});
 
 	test('should retrieve workflow', async () => {

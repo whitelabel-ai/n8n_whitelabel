@@ -131,6 +131,27 @@ export const workflowCreateFieldDocs = {
 	},
 } as const satisfies Record<string, ZodOpenAPIMetadata>;
 
+export const workflowListQueryFieldDocs = {
+	projectId: {
+		description:
+			'Filter by project ID. When you set this filter, `shared` lists only the share row of this project.',
+	},
+	folderId: {
+		description:
+			'Filter by folder ID. Includes workflows in all subfolders. Results respect the access of the caller. The project-root sentinel `0` is not supported.',
+	},
+} as const satisfies Record<string, ZodOpenAPIMetadata>;
+
+export const workflowReadFieldDocs = {
+	parentFolderId: {
+		description: 'ID of the folder that holds the workflow, or null at the project root',
+		example: 'X8ovzm8lTQjcXRZQ',
+	},
+	parentFolder: {
+		description: 'Folder that holds the workflow, or null at the project root',
+	},
+} as const satisfies Record<string, ZodOpenAPIMetadata>;
+
 export const workflowUpdateFieldDocs = {
 	description: {
 		description: 'Description of the workflow',

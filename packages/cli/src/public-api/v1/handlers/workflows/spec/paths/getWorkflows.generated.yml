@@ -28,8 +28,15 @@ parameters:
     in: query
   - schema:
       type: string
+      description: Filter by project ID. When you set this filter, `shared` lists only the share row of this project.
     required: false
     name: projectId
+    in: query
+  - schema:
+      type: string
+      description: Filter by folder ID. Includes workflows in all subfolders. Results respect the access of the caller. The project-root sentinel `0` is not supported.
+    required: false
+    name: folderId
     in: query
   - schema:
       type: string
@@ -364,6 +371,11 @@ responses:
                         - name
                         - createdAt
                         - updatedAt
+                  parentFolderId:
+                    type: string
+                    nullable: true
+                    description: ID of the folder that holds the workflow, or null at the project root
+                    example: X8ovzm8lTQjcXRZQ
                   shared:
                     type: array
                     items:
@@ -375,6 +387,78 @@ responses:
                           type: string
                         projectId:
                           type: string
+                        project:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                              readOnly: true
+                              example: VmwOO9HeTEj20kxM
+                            name:
+                              type: string
+                              example: Marketing
+                            type:
+                              type: string
+                              enum:
+                                - personal
+                                - team
+                              readOnly: true
+                              example: team
+                            icon:
+                              type: object
+                              description: Icon of the project, or null when the project has none
+                              properties:
+                                type:
+                                  type: string
+                                  enum:
+                                    - emoji
+                                    - icon
+                                value:
+                                  type: string
+                                color:
+                                  type: string
+                              required:
+                                - type
+                                - value
+                              nullable: true
+                            description:
+                              type: string
+                              nullable: true
+                              example: Workflows the marketing team owns.
+                            customTelemetryTags:
+                              type: array
+                              items:
+                                type: object
+                                properties:
+                                  key:
+                                    type: string
+                                  value:
+                                    type: string
+                                required:
+                                  - key
+                                  - value
+                            creatorId:
+                              type: string
+                              nullable: true
+                              example: f9a2cbb8-0b1e-4b64-9c1c-0d5f5f1f2a3b
+                            createdAt:
+                              type: string
+                              format: date-time
+                              readOnly: true
+                            updatedAt:
+                              type: string
+                              format: date-time
+                              readOnly: true
+                          required:
+                            - id
+                            - name
+                            - type
+                            - icon
+                            - description
+                            - customTelemetryTags
+                            - creatorId
+                            - createdAt
+                            - updatedAt
                         createdAt:
                           type: string
                           format: date-time
@@ -385,6 +469,7 @@ responses:
                         - role
                         - workflowId
                         - projectId
+                        - project
                         - createdAt
                         - updatedAt
                   activeVersion:
@@ -559,6 +644,7 @@ responses:
                   - settings
                   - staticData
                   - meta
+                  - parentFolderId
                   - shared
                   - activeVersion
             nextCursor:

@@ -13,6 +13,7 @@ import {
 	settingsOpenApi,
 	staticDataOpenApi,
 	workflowActiveDeprecationDocs,
+	workflowReadFieldDocs,
 } from './workflow-public.openapi';
 import { nullableObjectGuardSchema, objectGuardSchema } from '../../schemas/object-guard.schema';
 import { Z } from '../../zod-class';
@@ -108,8 +109,6 @@ export const workflowPublicSchema = z.object({
 	activeVersion: activeWorkflowVersionPublicSchema.nullable(),
 });
 
-export class WorkflowPublicDto extends Z.class(workflowPublicSchema.shape) {}
-
 export const workflowParentFolderPublicSchema = z.object({
 	id: z.string(),
 	name: z.string(),
@@ -117,6 +116,19 @@ export const workflowParentFolderPublicSchema = z.object({
 	createdAt: z.string().datetime(),
 	updatedAt: z.string().datetime(),
 });
+
+export class WorkflowPublicDto extends Z.class(workflowPublicSchema.shape) {}
+
+// Only the single-workflow read returns the folder. Other routes build their response from
+// `workflowPublicSchema` and do not load it.
+export const workflowReadPublicSchema = workflowPublicSchema.extend({
+	parentFolderId: z.string().nullable().openapi(workflowReadFieldDocs.parentFolderId),
+	parentFolder: workflowParentFolderPublicSchema
+		.nullable()
+		.openapi(workflowReadFieldDocs.parentFolder),
+});
+
+export class WorkflowReadPublicDto extends Z.class(workflowReadPublicSchema.shape) {}
 
 export const createdWorkflowPublicSchema = workflowPublicSchema.extend({
 	parentFolder: workflowParentFolderPublicSchema
@@ -149,10 +161,6 @@ export class DeletedWorkflowPublicDto extends Z.class(deletedWorkflowPublicSchem
 
 // The list query selects fewer columns than a single-workflow fetch, so these are absent from every
 // item — adding them back makes the response fail its own validation.
-export const workflowListItemSharedPublicSchema = sharedWorkflowPublicSchema.omit({
-	project: true,
-});
-
 export const workflowListItemActiveVersionPublicSchema = activeWorkflowVersionPublicSchema.omit({
 	workflowPublishHistory: true,
 });
@@ -166,7 +174,8 @@ export const workflowListItemPublicSchema = workflowPublicSchema
 		activeVersion: true,
 	})
 	.extend({
-		shared: z.array(workflowListItemSharedPublicSchema),
+		parentFolderId: z.string().nullable().openapi(workflowReadFieldDocs.parentFolderId),
+		shared: z.array(sharedWorkflowPublicSchema),
 		activeVersion: workflowListItemActiveVersionPublicSchema.nullable(),
 	});
 
