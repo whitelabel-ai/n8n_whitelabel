@@ -1,11 +1,10 @@
-import { isRecord } from '@n8n/utils/is-record';
-import { NodeApiError } from 'n8n-workflow';
 import type {
 	IDataObject,
 	IHttpRequestOptions,
 	ILoadOptionsFunctions,
 	INodeListSearchResult,
 } from 'n8n-workflow';
+import { toPathSegment } from 'n8n-workflow';
 
 import {
 	databricksApiRequest,
@@ -20,9 +19,11 @@ import {
 } from '../actions/helpers';
 import type { DatabricksJobRun } from '../actions/interfaces';
 import { getRunOutcome } from '../actions/job/runState';
+import { getSelectedLakebaseTarget } from '../actions/lakebase/helpers';
+import { fetchLakebaseFunctions } from '../actions/lakebase/schema';
 import {
-	assertLakebaseOAuth,
 	collectPages,
+	explainLakebaseSchemaError,
 	lakebaseApiRequest,
 	resolveLakebaseRestBase,
 	toPage,
@@ -577,17 +578,6 @@ const LAKEBASE_SEARCH_MAX_PAGES = 10;
 // Internal tables the Data API lists under Ignore privileges; a user table named databricks_* is still reachable By ID
 const INTERNAL_TABLE_PREFIX = /^databricks_/;
 
-function getSelectedLakebaseTarget(context: ILoadOptionsFunctions) {
-	const read = (name: string) =>
-		extractResourceLocatorValue(context.getCurrentNodeParameter(name)) || undefined;
-	return {
-		project: read('lakebaseProject'),
-		branch: read('lakebaseBranch'),
-		database: read('lakebaseDatabase'),
-		schema: read('lakebaseSchema'),
-	};
-}
-
 const byText = (filter: string | undefined) => {
 	const needle = filter?.toLowerCase();
 	return (item: { name: string; value: string }) =>
@@ -658,7 +648,7 @@ export async function getLakebaseBranches(
 
 	const { items, nextPageToken } = await listLakebase(
 		this,
-		`/api/2.0/postgres/projects/${encodeURIComponent(project)}/branches`,
+		`/api/2.0/postgres/projects/${toPathSegment(project)}/branches`,
 		(page: { branches?: LakebaseBranch[] }) => page.branches,
 		filter,
 		paginationToken,
@@ -691,7 +681,7 @@ export async function getLakebaseDatabases(
 
 	const { items, nextPageToken } = await listLakebase(
 		this,
-		`/api/2.0/postgres/projects/${encodeURIComponent(project)}/branches/${encodeURIComponent(branch)}/databases`,
+		`/api/2.0/postgres/projects/${toPathSegment(project)}/branches/${toPathSegment(branch)}/databases`,
 		(page: { databases?: LakebaseDatabase[] }) => page.databases,
 		filter,
 		paginationToken,
@@ -728,15 +718,13 @@ export async function getLakebaseTables(
 	if (!schema) {
 		return { results: [{ name: 'Please Select a Schema First', value: '' }] };
 	}
-	// A PAT can read the endpoints, so check before the lookup to name the real cause
-	assertLakebaseOAuth(this);
 	try {
 		const base = await resolveLakebaseRestBase(this, project, branch);
 		const doc: { components?: { schemas?: Record<string, unknown> } } = await lakebaseApiRequest(
 			this,
 			{
 				method: 'GET',
-				url: `${base}/${encodeURIComponent(database)}/${encodeURIComponent(schema)}/openapi.json`,
+				url: `${base}/${toPathSegment(database)}/${toPathSegment(schema)}/openapi.json`,
 				headers: { Accept: 'application/openapi+json, application/json' },
 				json: true,
 			},
@@ -747,19 +735,48 @@ export async function getLakebaseTables(
 			.filter(byText(filter));
 		return { results };
 	} catch (error) {
-		if (
-			error instanceof NodeApiError &&
-			isRecord(error.context.data) &&
-			error.context.data.code === 'PGRST205'
-		) {
-			// Only a NodeApiError keeps its description on the way to the dropdown, so mutate like makePermissionErrorLegible does
-			error.message =
-				'Turn on the "OpenAPI specification" setting of the Data API to list tables, or enter the table name By ID';
-			error.description =
-				'In Databricks open the project, then Data API > API > Advanced settings, and enable OpenAPI specification.';
-			throw error;
-		}
-		makePermissionErrorLegible(error);
-		throw error;
+		explainLakebaseSchemaError(
+			error,
+			'Turn on the "OpenAPI specification" setting of the Data API to list tables, or enter the table name By ID',
+		);
+	}
+}
+
+/** Databricks ships helper functions into user schemas; hide them from the list. UX only: grants decide what a user can run */
+const INTERNAL_FUNCTION_PREFIX = /^(databricks_|pg_databricks_|_dbx_|grant_)/;
+
+export async function getLakebaseFunctions(
+	this: ILoadOptionsFunctions,
+	filter?: string,
+): Promise<INodeListSearchResult> {
+	const { project, branch, database, schema } = getSelectedLakebaseTarget(this);
+	if (!project) {
+		return { results: [{ name: 'Please Select a Project First', value: '' }] };
+	}
+	if (!branch) {
+		return { results: [{ name: 'Please Select a Branch First', value: '' }] };
+	}
+	if (!database) {
+		return { results: [{ name: 'Please Select a Database First', value: '' }] };
+	}
+	if (!schema) {
+		return { results: [{ name: 'Please Select a Schema First', value: '' }] };
+	}
+	try {
+		const base = await resolveLakebaseRestBase(this, project, branch);
+		const names = await fetchLakebaseFunctions(
+			this,
+			`${base}/${toPathSegment(database)}/${toPathSegment(schema)}`,
+		);
+		const results = names
+			.filter((name) => !INTERNAL_FUNCTION_PREFIX.test(name))
+			.map((name) => ({ name, value: name }))
+			.filter(byText(filter));
+		return { results };
+	} catch (error) {
+		explainLakebaseSchemaError(
+			error,
+			'Turn on the "OpenAPI specification" setting of the Data API to list functions, or enter the function name By ID',
+		);
 	}
 }

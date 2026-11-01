@@ -3,11 +3,14 @@ import {
 	CreatedWorkflowPublicDto,
 	CreateWorkflowPublicDto,
 	DeletedWorkflowPublicDto,
+	DependencyListPublicDto,
 	DeprecatedWorkflowVersionPublicDto,
 	GetWorkflowQueryDto,
+	ListDependenciesQueryDto,
 	ListWorkflowHistoryQueryDto,
 	ListWorkflowsQueryDto,
 	PublishWorkflowPublicDto,
+	RetrievedWorkflowPublicDto,
 	TagIdsPublicDto,
 	TransferWorkflowPublicDto,
 	UpdatedWorkflowPublicDto,
@@ -15,7 +18,6 @@ import {
 	UpdateWorkflowQueryDto,
 	WorkflowListPublicDto,
 	WorkflowPublicDto,
-	WorkflowReadPublicDto,
 	WorkflowPublishBlockedErrorPublicDto,
 	WorkflowPublishForbiddenErrorPublicDto,
 	WorkflowPublishPublicDto,
@@ -62,7 +64,9 @@ import { ResponseError, BadRequestError, NotFoundError } from '@n8n/errors';
 import { SharedWorkflowNotFoundError } from '@/errors/shared-workflow-not-found.error';
 import { WorkflowHistoryVersionNotFoundError } from '@/errors/workflow-history-version-not-found.error';
 import { RedactionEnforcementService } from '@/modules/redaction/redaction-enforcement.service';
+import { WorkflowDependencyQueryService } from '@/modules/workflow-index/workflow-dependency-query.service';
 import { PolicyViolationError } from '@/policy/policy-violation.error';
+import { toDependencyListPublicDto } from '@/public-api/v1/shared/dependency.mapper';
 import { toPublicProject } from '@/public-api/v1/shared/project.mapper';
 import {
 	decodeCursor,
@@ -121,6 +125,10 @@ function toPublicFolder(folder: Folder) {
 		createdAt: folder.createdAt.toISOString(),
 		updatedAt: folder.updatedAt.toISOString(),
 	};
+}
+
+function toPublicParentFolderRef(folder: Folder | null) {
+	return folder ? { id: folder.id } : null;
 }
 
 function toPublicSharedWorkflow(sharedWorkflow: SharedWorkflow) {
@@ -204,6 +212,7 @@ export class WorkflowsPublicController {
 		private readonly globalConfig: GlobalConfig,
 		private readonly tagService: TagService,
 		private readonly redactionEnforcementService: RedactionEnforcementService,
+		private readonly workflowDependencyQueryService: WorkflowDependencyQueryService,
 	) {}
 
 	private get workflowTagsEnabled(): boolean {
@@ -258,6 +267,7 @@ export class WorkflowsPublicController {
 				includeTags: this.workflowTagsEnabled,
 				includeActiveVersion: true,
 				includeProjects: true,
+				// Fork: always load the folder so list items can carry `parentFolderId`.
 				includeParentFolder: true,
 			},
 		);
@@ -279,7 +289,6 @@ export class WorkflowsPublicController {
 				isArchived: workflow.isArchived,
 				versionId: workflow.versionId,
 				triggerCount: workflow.triggerCount,
-				parentFolderId: workflow.parentFolder?.id ?? null,
 				nodes: workflow.nodes,
 				connections: workflow.connections,
 				nodeGroups: workflow.nodeGroups,
@@ -288,7 +297,11 @@ export class WorkflowsPublicController {
 				meta: toPublicJson(workflow.meta),
 				...(query.excludePinnedData ? {} : { pinData: toPublicJson(workflow.pinData) }),
 				...(workflow.tags ? { tags: workflow.tags.map(toPublicTag) } : {}),
+				parentFolderId: workflow.parentFolder?.id ?? null,
 				shared: workflow.shared.map(toPublicSharedWorkflow),
+				...(query.includeParentFolder
+					? { parentFolder: toPublicParentFolderRef(workflow.parentFolder) }
+					: {}),
 				activeVersion: workflow.activeVersion
 					? toPublicActiveVersionWithoutHistory(workflow.activeVersion)
 					: null,
@@ -337,22 +350,22 @@ export class WorkflowsPublicController {
 	@ApiSummary('Retrieve a workflow')
 	@ApiDescription('Retrieve a workflow.')
 	@ApiTags(['Workflow'])
-	@ApiResponse(200, WorkflowReadPublicDto)
+	@ApiResponse(200, RetrievedWorkflowPublicDto)
 	@ApiErrorResponse(404)
 	async getWorkflow(
 		req: AuthenticatedRequest,
 		_res: Response,
 		@Param('workflowId', workflowIdParamSchema) workflowId: string,
 		@Query query: GetWorkflowQueryDto,
-	): Promise<WorkflowReadPublicDto> {
+	): Promise<RetrievedWorkflowPublicDto> {
 		const workflow = await this.workflowFinderService.findWorkflowForUser(
 			workflowId,
 			req.user,
 			['workflow:read'],
 			{
 				includeTags: this.workflowTagsEnabled,
-				includeParentFolder: true,
 				includeActiveVersion: true,
+				includeParentFolder: true,
 			},
 		);
 
@@ -367,6 +380,7 @@ export class WorkflowsPublicController {
 
 		return {
 			...this.toWorkflowPublicDto(workflow, { excludePinnedData: query.excludePinnedData }),
+			// Fork: alias of `parentFolder.id`, kept for backward compatibility.
 			parentFolderId: workflow.parentFolder?.id ?? null,
 			parentFolder: workflow.parentFolder ? toPublicFolder(workflow.parentFolder) : null,
 		};
@@ -831,6 +845,42 @@ export class WorkflowsPublicController {
 		const tags = await this.workflowService.updateWorkflowTags(req.user, workflowId, tagIds);
 
 		return tags.map(toPublicTag);
+	}
+
+	@Get('/:workflowId/dependencies')
+	@ApiKeyScope('workflow:read')
+	@ProjectScope('workflow:read')
+	@ApiSummary('List workflow dependencies')
+	@ApiDescription(
+		'List the credentials, data tables, sub-workflows and error workflow that the workflow uses, ' +
+			'and the workflows and agents that use the workflow.',
+	)
+	@ApiTags(['Workflow'])
+	@ApiResponse(200, DependencyListPublicDto)
+	@ApiErrorResponse(404)
+	async getWorkflowDependencies(
+		req: AuthenticatedRequest,
+		_res: Response,
+		@Param('workflowId', workflowIdParamSchema) workflowId: string,
+		@Query query: ListDependenciesQueryDto,
+	): Promise<DependencyListPublicDto> {
+		const pagination = resolveOffsetPagination(query);
+		const workflow = await this.workflowFinderService.findWorkflowHeadForUser(
+			workflowId,
+			req.user,
+			['workflow:read'],
+		);
+		if (!workflow) {
+			throw new NotFoundError('Not Found');
+		}
+
+		const result = await this.workflowDependencyQueryService.getResourceDependencies(
+			[workflowId],
+			'workflow',
+			req.user,
+		);
+
+		return toDependencyListPublicDto(result[workflowId], pagination);
 	}
 
 	/**

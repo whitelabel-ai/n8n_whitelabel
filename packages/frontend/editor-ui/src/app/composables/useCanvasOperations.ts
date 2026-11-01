@@ -172,6 +172,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { useTemplatesStore } from '@/features/workflows/templates/templates.store';
 import { isValidNodeConnectionType } from '@/app/utils/typeGuards';
 import { removePreviewToken } from '@/features/shared/nodeCreator/nodeCreator.utils';
+import { useRestrictedNodeWarning } from '@/features/shared/nodeCreator/composables/useRestrictedNodeWarning';
 import { useSetupPanelStore } from '@/features/setupPanel/setupPanel.store';
 import { useEmptyCanvasGroupsFlag } from '@/features/workflows/canvas/composables/useEmptyCanvasGroupsFlag';
 import { clearAllNodeResourceLocatorValues } from '@/features/workflows/templates/utils/templateTransforms';
@@ -198,7 +199,6 @@ type AddNodesBaseOptions = {
 	trackHistory?: boolean;
 	keepPristine?: boolean;
 	telemetry?: boolean;
-	forcePosition?: boolean;
 	viewport?: ViewportBoundaries;
 };
 
@@ -273,6 +273,7 @@ export function useCanvasOperations() {
 	const workflowHelpers = useWorkflowHelpers();
 	const nodeHelpers = useNodeHelpers();
 	const aiSimulatedDataGuard = useAiSimulatedDataGuard();
+	const { warnIfRestricted } = useRestrictedNodeWarning();
 	const {
 		requireNodeTypeDescription,
 		resolveNodeParameters,
@@ -537,7 +538,8 @@ export function useCanvasOperations() {
 		newName: string,
 		{ trackHistory = false, trackBulk = true, showErrorToast = true } = {},
 	): Promise<string | false> {
-		if (currentName === newName) {
+		const node = workflowDocumentStore.value.getNodeByName(currentName);
+		if (currentName === newName || (node && nodeTypesStore.isNodeDeprecated(node))) {
 			return false;
 		}
 
@@ -721,7 +723,6 @@ export function useCanvasOperations() {
 				},
 				anchorNodeType,
 				{
-					forcePosition: true,
 					isAutoAdd: true,
 					openNDV: false,
 					trackHistory,
@@ -1113,11 +1114,14 @@ export function useCanvasOperations() {
 	}
 
 	function toggleNodesDisabled(ids: string[], { trackHistory = true, trackBulk = true } = {}) {
+		const nodes = workflowDocumentStore.value.getNodesByIds(ids);
+		if (nodes.some(nodeTypesStore.isNodeDeprecated)) return;
+		if (refuseRestrictedNodes(nodes)) return;
+
 		if (trackHistory && trackBulk) {
 			historyStore.startRecordingUndo();
 		}
 
-		const nodes = workflowDocumentStore.value.getNodesByIds(ids);
 		nodeHelpers.disableNodes(nodes, { trackHistory, trackBulk: false });
 
 		if (trackHistory && trackBulk) {
@@ -1138,6 +1142,7 @@ export function useCanvasOperations() {
 		{ trackHistory = true, trackBulk = true } = {},
 	) {
 		const nodes = workflowDocumentStore.value.getNodesByIds(ids);
+		if (refuseRestrictedNodes(nodes)) return;
 
 		// Filter to only pinnable nodes
 		const pinnableNodesWithPinnedData = nodes
@@ -1600,7 +1605,7 @@ export function useCanvasOperations() {
 	function resolveNodeData(
 		node: AddNodeDataWithTypeVersion,
 		nodeTypeDescription: INodeTypeDescription,
-		options: { viewport?: ViewportBoundaries; forcePosition?: boolean } = {},
+		options: { viewport?: ViewportBoundaries } = {},
 	) {
 		const id = node.id ?? nodeHelpers.assignNodeId(node as INodeUi);
 		const name =
@@ -1610,12 +1615,9 @@ export function useCanvasOperations() {
 			(nodeTypeDescription.defaults.name as string);
 		const type = node.type ?? nodeTypeDescription.name;
 		const typeVersion = node.typeVersion;
-		const position =
-			options.forcePosition && node.position
-				? node.position
-				: resolveNodePosition(node as INodeUi, nodeTypeDescription, {
-						viewport: options.viewport,
-					});
+		const position = resolveNodePosition(node as INodeUi, nodeTypeDescription, {
+			viewport: options.viewport,
+		});
 		const disabled = node.disabled ?? false;
 		const parameters = node.parameters ?? {};
 
@@ -3667,8 +3669,25 @@ export function useCanvasOperations() {
 		return filteredConnections;
 	}
 
+	/**
+	 * Refuses an operation on a restricted node, and says why.
+	 * The context menu disables its own items, but the keyboard shortcuts cannot,
+	 * so the refusal must explain itself.
+	 */
+	function refuseRestrictedNodes(nodes: INodeUi[]): boolean {
+		const restricted = nodes.find((node) => isNodeTypeRestricted(node.type));
+		if (!restricted) return false;
+
+		warnIfRestricted(restricted.type);
+		return true;
+	}
+
 	async function duplicateNodes(ids: string[], options: { viewport?: ViewportBoundaries } = {}) {
-		const workflowData = deepCopy(getNodesToSave(workflowDocumentStore.value.getNodesByIds(ids)));
+		const nodes = workflowDocumentStore.value.getNodesByIds(ids);
+		if (nodes.some(nodeTypesStore.isNodeDeprecated)) return [];
+		if (refuseRestrictedNodes(nodes)) return [];
+
+		const workflowData = deepCopy(getNodesToSave(nodes));
 		const result = await importWorkflowData(workflowData, 'duplicate', {
 			viewport: options.viewport,
 			importTags: false,
@@ -3676,11 +3695,9 @@ export function useCanvasOperations() {
 
 		return result.nodes?.map((node) => node.id).filter(isPresent) ?? [];
 	}
-	async function copyNodes(ids: string[]): Promise<boolean> {
-		const nodes = workflowDocumentStore.value.getNodesByIds(ids);
-		const hasRestrictedNode = nodes.some((node) => isNodeTypeRestricted(node.type));
-		if (hasRestrictedNode) return false;
 
+	async function copyNodes(ids: string[]) {
+		const nodes = workflowDocumentStore.value.getNodesByIds(ids);
 		const workflowData = deepCopy(getNodesToSave(nodes));
 		if (!emptyCanvasGroupsEnabled.value) {
 			removeEmptyCanvasGroupsFromWorkflowData(workflowData, nodes);
@@ -3697,13 +3714,12 @@ export function useCanvasOperations() {
 			node_types: workflowData.nodes.map((node) => node.type),
 			workflow_id: workflowDocumentStore.value.workflowId,
 		});
-
-		return true;
 	}
 
 	async function cutNodes(ids: string[], deleteWholeGroupIds: string[] = []) {
-		if (!(await copyNodes(ids))) return;
-
+		const nodes = workflowDocumentStore.value.getNodesByIds(ids);
+		if (nodes.some(nodeTypesStore.isNodeDeprecated)) return;
+		await copyNodes(ids);
 		deleteNodes(ids, { deleteWholeGroupIds });
 	}
 

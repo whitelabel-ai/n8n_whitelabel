@@ -1,5 +1,6 @@
 import { Logger } from '@n8n/backend-common';
 import { OutboundHttp } from '@n8n/backend-network';
+import { InstanceRegistryProxyService } from '@n8n/backend-services';
 import { GlobalConfig } from '@n8n/config';
 import {
 	ProjectRelationRepository,
@@ -29,6 +30,7 @@ import { PostHogClient } from '@/posthog';
 
 import { SourceControlPreferencesService } from '../modules/source-control.ee/source-control-preferences.service.ee';
 import { USER_CALLED_MCP_TOOL_EVENT } from '../modules/mcp/mcp.constants';
+import { summarizeFootprint } from './cluster-footprint';
 
 type ExecutionTrackDataKey =
 	| 'manual_error'
@@ -82,6 +84,7 @@ interface IAgentExecutionCountsBuffer {
 		agent_id: string;
 		user_id?: string;
 		run_type: AgentRunTelemetryType;
+		first_message_at?: string;
 		counts_by_source: Record<string, IAgentExecutionCounts>;
 	};
 }
@@ -93,6 +96,8 @@ interface IAgentSessionMetrics {
 	tool_call_count: number;
 	num_skills: number;
 	turn_count: number;
+	skill_load_count: number;
+	loaded_skill_ids: Set<string>;
 }
 
 interface IAgentSessionMetricsBuffer {
@@ -259,6 +264,7 @@ export class Telemetry {
 			read_only_instance: sourceControlPreferences.branchReadOnly,
 			team_projects: (await Container.get(ProjectRepository).getProjectCounts()).team,
 			project_role_count: await Container.get(ProjectRelationRepository).countUsersByRole(),
+			...summarizeFootprint(await Container.get(InstanceRegistryProxyService).getAllInstances()),
 		};
 
 		this.track('pulse', pulsePacket);
@@ -325,7 +331,7 @@ export class Telemetry {
 			// message_count = 0.
 			const { agent_id, user_id, run_type, ...counts } = this.agentExecutionCountsBuffer[bufferKey];
 			this.track(TELEMETRY_EVENT.AGENTS.AGENT_EXECUTION_COUNT, {
-				event_version: '2',
+				event_version: '3',
 				agent_id,
 				...(user_id ? { user_id } : {}),
 				run_type,
@@ -381,6 +387,13 @@ export class Telemetry {
 			token_count_sum: sessions.reduce((total, session) => total + session.token_count, 0),
 			tool_call_count_sum: sessions.reduce((total, session) => total + session.tool_call_count, 0),
 			num_skills_sum: sessions.reduce((total, session) => total + session.num_skills, 0),
+			skill_load_count_sum: sessions.reduce(
+				(total, session) => total + session.skill_load_count,
+				0,
+			),
+			loaded_skill_ids: [
+				...new Set(sessions.flatMap((session) => [...session.loaded_skill_ids])),
+			].sort(),
 		};
 	}
 
@@ -468,6 +481,9 @@ export class Telemetry {
 		};
 
 		const agentExecutionCounts = this.agentExecutionCountsBuffer[bufferKey];
+		if (message_count > 0) {
+			agentExecutionCounts.first_message_at ??= new Date().toISOString();
+		}
 		agentExecutionCounts.message_count += message_count;
 		agentExecutionCounts.token_count += token_count;
 		agentExecutionCounts.tool_call_count += tool_call_count;
@@ -510,12 +526,18 @@ export class Telemetry {
 				tool_call_count: 0,
 				num_skills: properties.configuration.num_skills,
 				turn_count: 0,
+				skill_load_count: 0,
+				loaded_skill_ids: new Set<string>(),
 			};
 
 			session.latency_ms += properties.latency_ms;
 			session.cost += properties.cost;
 			session.token_count += properties.token_count;
 			session.tool_call_count += properties.tool_call_count;
+			session.skill_load_count += properties.skill_load_count ?? 0;
+			for (const skillId of properties.loaded_skill_ids ?? []) {
+				session.loaded_skill_ids.add(skillId);
+			}
 			session.turn_count++;
 			sessions[properties.thread_id] = session;
 		}
@@ -542,6 +564,11 @@ export class Telemetry {
 		if (user_agent) {
 			entry.user_agents[user_agent] = (entry.user_agents[user_agent] ?? 0) + 1;
 		}
+	}
+
+	/** Sends the queued events now, instead of at the next flush interval. */
+	async flushQueue(): Promise<void> {
+		await this.rudderStack?.flush();
 	}
 
 	@OnShutdown(LOWEST_SHUTDOWN_PRIORITY)

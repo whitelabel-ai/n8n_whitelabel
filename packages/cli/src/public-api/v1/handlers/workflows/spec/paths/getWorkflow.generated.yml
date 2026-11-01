@@ -4,9 +4,6 @@ tags:
 summary: Retrieve a workflow
 description: Retrieve a workflow.
 x-required-scope: workflow:read
-x-eov-operation-id: unreachable
-x-eov-operation-handler: v1/handlers/decorator-routed.handler
-x-decorator-routed: true
 parameters:
   - schema:
       type: string
@@ -139,12 +136,6 @@ responses:
                           required:
                             - key
                             - value
-                  createdAt:
-                    type: string
-                    format: date-time
-                  updatedAt:
-                    type: string
-                    format: date-time
             connections:
               type: object
               description: Connections between nodes, keyed by source node name
@@ -229,6 +220,11 @@ responses:
                     - separate
                     - combined
                   description: Controls how binary data is resolved from a node's input. This is a derived, internal setting rather than something intended to be set programmatically. It is included in workflow responses for reference, but any value sent when creating or updating a workflow is ignored.
+                engineType:
+                  type: string
+                  nullable: true
+                  example: v1
+                  description: The execution engine that runs this workflow. n8n sets it on new workflows when the instance runs new workflows on engine v2 (`N8N_ENGINE_DEFAULT_TYPE=v2` with the `engine-v2` module enabled). It is included in workflow responses for reference, but any value sent when creating or updating a workflow is ignored.
                 callerPolicy:
                   type: string
                   enum:
@@ -279,6 +275,10 @@ responses:
                     - `non-manual`: Redact production (non-manually triggered) executions only.
                     - `manual-only`: Redact manually triggered executions only.
                     - `all`: Redact all executions, manual and production.
+                redactCallerExecutions:
+                  type: boolean
+                  example: true
+                  description: Controls whether a workflow that calls this workflow as a sub-workflow has its executions redacted on the same channels as this workflow. The calling execution keeps a copy of the output of this workflow. Defaults to true. Turn it off only when the output of this workflow is not sensitive. Redaction that this workflow received from its own sub-workflows always passes to the caller.
                 availableInMCP:
                   type: boolean
                   example: false
@@ -528,12 +528,6 @@ responses:
                               required:
                                 - key
                                 - value
-                      createdAt:
-                        type: string
-                        format: date-time
-                      updatedAt:
-                        type: string
-                        format: date-time
                 connections:
                   type: object
                   description: Connections between nodes, keyed by source node name
@@ -633,7 +627,7 @@ responses:
             parentFolderId:
               type: string
               nullable: true
-              description: ID of the folder that holds the workflow, or null at the project root
+              description: ID of the folder that holds the workflow, or null at the project root. Same value as `parentFolder.id`, kept for backward compatibility.
               example: X8ovzm8lTQjcXRZQ
             parentFolder:
               type: object
@@ -658,7 +652,7 @@ responses:
                 - parentFolderId
                 - createdAt
                 - updatedAt
-              description: Folder that holds the workflow, or null at the project root
+              description: Folder that contains the workflow, or null at the project root
           required:
             - id
             - name
@@ -690,3 +684,5 @@ responses:
     $ref: ../../../../shared/spec/responses/forbidden.yml
   '404':
     $ref: ../../../../shared/spec/responses/notFound.yml
+  '429':
+    $ref: ../../../../shared/spec/responses/tooManyRequests.yml

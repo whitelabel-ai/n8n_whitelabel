@@ -6,9 +6,11 @@ import { z } from 'zod';
 import {
 	connectionsOpenApi,
 	workflowCreateFieldDocs,
+	listParentFolderOpenApi,
 	metaOpenApi,
 	nodeGroupsOpenApi,
 	nodesOpenApi,
+	parentFolderOpenApi,
 	pinDataOpenApi,
 	settingsOpenApi,
 	staticDataOpenApi,
@@ -109,6 +111,8 @@ export const workflowPublicSchema = z.object({
 	activeVersion: activeWorkflowVersionPublicSchema.nullable(),
 });
 
+export class WorkflowPublicDto extends Z.class(workflowPublicSchema.shape) {}
+
 export const workflowParentFolderPublicSchema = z.object({
 	id: z.string(),
 	name: z.string(),
@@ -117,18 +121,9 @@ export const workflowParentFolderPublicSchema = z.object({
 	updatedAt: z.string().datetime(),
 });
 
-export class WorkflowPublicDto extends Z.class(workflowPublicSchema.shape) {}
-
-// Only the single-workflow read returns the folder. Other routes build their response from
-// `workflowPublicSchema` and do not load it.
-export const workflowReadPublicSchema = workflowPublicSchema.extend({
-	parentFolderId: z.string().nullable().openapi(workflowReadFieldDocs.parentFolderId),
-	parentFolder: workflowParentFolderPublicSchema
-		.nullable()
-		.openapi(workflowReadFieldDocs.parentFolder),
+export const workflowParentFolderRefPublicSchema = workflowParentFolderPublicSchema.pick({
+	id: true,
 });
-
-export class WorkflowReadPublicDto extends Z.class(workflowReadPublicSchema.shape) {}
 
 export const createdWorkflowPublicSchema = workflowPublicSchema.extend({
 	parentFolder: workflowParentFolderPublicSchema
@@ -137,6 +132,13 @@ export const createdWorkflowPublicSchema = workflowPublicSchema.extend({
 });
 
 export class CreatedWorkflowPublicDto extends Z.class(createdWorkflowPublicSchema.shape) {}
+
+export const retrievedWorkflowPublicSchema = workflowPublicSchema.extend({
+	parentFolderId: z.string().nullable().openapi(workflowReadFieldDocs.parentFolderId),
+	parentFolder: workflowParentFolderPublicSchema.nullable().openapi(parentFolderOpenApi),
+});
+
+export class RetrievedWorkflowPublicDto extends Z.class(retrievedWorkflowPublicSchema.shape) {}
 
 export const workflowPublishPublicSchema = workflowPublicSchema.omit({ shared: true });
 
@@ -159,8 +161,8 @@ export const deletedWorkflowPublicSchema = workflowPublicSchema.extend({
 
 export class DeletedWorkflowPublicDto extends Z.class(deletedWorkflowPublicSchema.shape) {}
 
-// The list query selects fewer columns than a single-workflow fetch, so these are absent from every
-// item — adding them back makes the response fail its own validation.
+// The list query selects fewer columns than a single-workflow fetch, so the publish history is
+// absent from every item — adding it back makes the response fail its own validation.
 export const workflowListItemActiveVersionPublicSchema = activeWorkflowVersionPublicSchema.omit({
 	workflowPublishHistory: true,
 });
@@ -177,6 +179,10 @@ export const workflowListItemPublicSchema = workflowPublicSchema
 		parentFolderId: z.string().nullable().openapi(workflowReadFieldDocs.parentFolderId),
 		shared: z.array(sharedWorkflowPublicSchema),
 		activeVersion: workflowListItemActiveVersionPublicSchema.nullable(),
+		parentFolder: workflowParentFolderRefPublicSchema
+			.nullable()
+			.optional()
+			.openapi(listParentFolderOpenApi),
 	});
 
 export class WorkflowListPublicDto extends Z.class({

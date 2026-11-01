@@ -1,9 +1,15 @@
-import { type Agent as RuntimeAgent, type SerializableAgentState } from '@n8n/agents';
+import {
+	readEpisodicScopeDecision,
+	type Agent as RuntimeAgent,
+	type EpisodicScopeDecision,
+	type SerializableAgentState,
+} from '@n8n/agents';
 import type {
 	AgentBackgroundJobSignal,
 	AgentMessageAuthor,
 	AgentChatMessagesResponse,
 	BudgetGuardrailConfig,
+	AgentBudgetNotice,
 } from '@n8n/api-types';
 import { N8N_CHAT_INTEGRATION_TYPE } from '@n8n/api-types';
 import { Logger } from '@n8n/backend-common';
@@ -29,6 +35,7 @@ import {
 	userIdFromDraftChatMemoryResourceId,
 	userIdFromProductionChatMemoryResourceId,
 } from './utils/agent-memory-scope';
+import { episodicScopeHostMetadata } from './utils/episodic-scope-metadata';
 import {
 	chatSurfaceMemoryResourceId,
 	N8N_CHAT_PRODUCTION_SOURCE,
@@ -48,6 +55,7 @@ import {
 } from './agent-sandbox-principal';
 import { AgentSandboxRuntimeService } from './agent-sandbox-runtime.service';
 import { AgentsSettingsService } from './agents-settings.service';
+import { AgentSkillRefsService } from './agent-skill-refs.service';
 import { buildAgentConfigurationTelemetry } from './agent-telemetry';
 import { AgentTurnExecutionService, type AgentTurnRequest } from './agent-turn-execution.service';
 import { withBudgetGuardrail } from './budget-guardrail';
@@ -63,7 +71,7 @@ import type {
 } from './integrations/integration-tool-types';
 import { IntegrationMessageContextService } from './integrations/integration-message-context.service';
 import { N8NCheckpointStorage } from './integrations/n8n-checkpoint-storage';
-import { modelStreamStallOptions } from './model-stream-stall-options';
+import { modelStreamStallOptions } from '@/utils/model-stream-stall-options';
 import { AgentRepository } from './repositories/agent.repository';
 import { AgentBackgroundJobRepository } from './repositories/agent-background-job.repository';
 import { AgentBackgroundJobService } from './background/agent-background-job.service';
@@ -76,7 +84,7 @@ import type { StoredAttachmentRef } from './types/agent-chat-attachment';
 import type { AgentExecutionAdmission } from './types/agent-queued-message';
 import type { AgentExecutionStreamChunk } from './types/agent-steering';
 import { createAgentExecutionCounter } from './utils/agent-execution-counter';
-import { getPublishedAgentSnapshot } from './utils/agent-published-snapshot';
+import { resolveAgentRunSource } from './utils/agent-published-snapshot';
 import { buildInboundUserMessage } from './utils/inbound-attachments';
 import { executionsToMessagesDto } from './utils/execution-to-message-mapper';
 
@@ -109,6 +117,8 @@ interface ChatExecutionCallbacks {
 }
 
 export interface ExecuteForChatConfig extends ChatExecutionInput, ChatExecutionCallbacks {
+	pauseReport?: boolean;
+	hideUserMessageFromTranscript?: boolean;
 	/**
 	 * The calling n8n user — used to gate node/workflow tools by their access,
 	 * and for RBAC / credential resolution and telemetry attribution. Always
@@ -125,12 +135,14 @@ export interface ExecuteForChatConfig extends ChatExecutionInput, ChatExecutionC
 	 */
 	previewChat?: boolean;
 	/** Preview chat sends the approaching-budget card. The run continues. */
-	onBudgetNotice?: () => void;
+	onBudgetNotice?: (notice: AgentBudgetNotice) => void;
 	abortSignal?: AbortSignal;
 }
 
 export interface ExecuteForChatPublishedConfig extends ChatExecutionInput {
 	messageContext?: IntegrationMessageContext | null;
+	/** The channel's episodic scope decision. Absent on an integration resource means off. */
+	episodicScope?: EpisodicScopeDecision;
 	/** Platform conversation metadata scope. Execution memory can belong to a task. */
 	contextConversation?: SessionBinding;
 	/** What the model receives when it differs from `message`, e.g. with an author label or thread history. */
@@ -185,7 +197,7 @@ export interface ResumeForChatConfig extends ChatExecutionCallbacks {
 	/** The chat surface this resume runs under. Undefined for integrations. */
 	chatSurface?: AgentChatSurface;
 	/** Preview chat sends the approaching-budget card. The run continues. */
-	onBudgetNotice?: () => void;
+	onBudgetNotice?: (notice: AgentBudgetNotice) => void;
 	/** Allows an automatic preview resume to overlap its predecessor's finalization. */
 	automaticPreviewContinuation?: boolean;
 	abortSignal?: AbortSignal;
@@ -228,6 +240,8 @@ export interface StreamChatResponseConfig extends ChatExecutionInput, ChatExecut
 	onAdmitted?: () => Promise<void>;
 	access: AgentThreadAccess;
 	messageContext?: IntegrationMessageContext | null;
+	/** The channel's episodic scope decision. Absent on an integration resource means off. */
+	episodicScope?: EpisodicScopeDecision;
 	agentInstance: RuntimeAgent;
 	toolRegistry: ToolRegistry;
 	/** Saved budget from the reconstructed runtime. Absent when the config has none. */
@@ -249,7 +263,7 @@ export interface StreamChatResponseConfig extends ChatExecutionInput, ChatExecut
 	/** The chat surface this turn runs under. Undefined for integrations and tasks. */
 	chatSurface?: AgentChatSurface;
 	/** Preview chat sends the approaching-budget card. The run continues. */
-	onBudgetNotice?: () => void;
+	onBudgetNotice?: (notice: AgentBudgetNotice) => void;
 	abortSignal?: AbortSignal;
 	sandboxPrincipalHash: AgentSandboxPrincipalHash;
 	/** Hide the internal wake instruction from the execution transcript. */
@@ -347,6 +361,7 @@ export class AgentExecutionOrchestratorService {
 		private readonly backgroundJobRepository: AgentBackgroundJobRepository,
 		private readonly backgroundJobService: AgentBackgroundJobService,
 		private readonly settingsService: AgentsSettingsService,
+		private readonly agentSkillRefs: AgentSkillRefsService,
 	) {}
 
 	async getSessionMode(threadId: string): Promise<AgentSessionMode> {
@@ -757,6 +772,7 @@ export class AgentExecutionOrchestratorService {
 									)
 							: undefined,
 					messageContext,
+					episodicScope: config.episodicScope,
 					access: { accessScope: 'project', ownerId: null },
 					agentInstance: runtime.agent,
 					toolRegistry: runtime.toolRegistry,
@@ -1032,6 +1048,7 @@ export class AgentExecutionOrchestratorService {
 					abortSignal,
 					delivery,
 					messageContext?.interactingUserId,
+					memory.threadId,
 				),
 		);
 		for await (const _chunk of stream) {
@@ -1044,6 +1061,7 @@ export class AgentExecutionOrchestratorService {
 		abortSignal: AbortSignal,
 		delivery?: { bridge: AgentChatBridge; threadId: string },
 		cardRecipientId?: string,
+		agentThreadId?: string,
 	): AsyncGenerator<AgentExecutionStreamChunk> {
 		const chunks: AgentExecutionStreamChunk[] = [];
 		let runError: unknown;
@@ -1061,7 +1079,12 @@ export class AgentExecutionOrchestratorService {
 		}
 		abortSignal.throwIfAborted();
 		if (delivery)
-			await delivery.bridge.deliverWakeResponse(delivery.threadId, chunks, cardRecipientId);
+			await delivery.bridge.deliverWakeResponse(
+				delivery.threadId,
+				chunks,
+				cardRecipientId,
+				agentThreadId,
+			);
 	}
 
 	private async getWakeDelivery(
@@ -1103,6 +1126,7 @@ export class AgentExecutionOrchestratorService {
 		if (!config.admittedExecution && !config.isWakeRun) {
 			await this.settingsService.assertEnabled();
 		}
+
 		yield* this.turnExecutionService.execute({
 			admittedExecution: config.admittedExecution,
 			onAdmitted: config.onAdmitted,
@@ -1117,7 +1141,7 @@ export class AgentExecutionOrchestratorService {
 			backgroundJobSignal: config.backgroundJobSignal,
 			onExecutionRecorded: config.onExecutionRecorded,
 			chatSurface: config.chatSurface,
-			isWakeRun: config.isWakeRun,
+			acceptsSteering: !config.pauseReport,
 			onExecutionStarted: config.onExecutionStarted,
 			onSettled: config.isWakeRun
 				? undefined
@@ -1195,21 +1219,26 @@ export class AgentExecutionOrchestratorService {
 			abortSignal?.throwIfAborted();
 			const { agentId, projectId } = params;
 			let agent;
+			let selected;
 			try {
 				agent = await this.agentRepository.findByIdAndProjectId(agentId, projectId);
+				if (agent) {
+					selected = await resolveAgentRunSource(
+						agent,
+						params.usePublishedVersion === true && Boolean(agent.activeVersion?.schema),
+						this.agentSkillRefs,
+						{},
+					);
+				}
 			} catch (cause) {
 				throw new AgentExecutionRecordingError({ phase: 'create', cause, executionError: error });
 			}
 			abortSignal?.throwIfAborted();
-			if (agent) {
-				const selected =
-					params.usePublishedVersion && agent.activeVersion?.schema
-						? getPublishedAgentSnapshot(agent)
-						: agent;
+			if (agent && selected) {
 				const failed = {
 					...recording,
 					agentId,
-					agentName: selected.schema?.name ?? agent.name,
+					agentName: selected.agent.schema?.name ?? agent.name,
 					projectId,
 					telemetry: {
 						userId: params.attributionUserId ?? params.user?.id,
@@ -1360,7 +1389,14 @@ export class AgentExecutionOrchestratorService {
 		return {
 			runId,
 			toolCallId,
-			hostMetadata: encodeIntegrationMessageContext(selectedContext),
+			hostMetadata: {
+				...encodeIntegrationMessageContext(selectedContext),
+				// The resume merge lets this metadata win, so it must not replace a stored decision.
+				// A checkpoint from before channels resolved a scope gets the integration fallback.
+				...(readEpisodicScopeDecision(memoryScope.hostMetadata)
+					? {}
+					: episodicScopeHostMetadata(memoryScope.resourceId)),
+			},
 			...(selectedContext && conversation
 				? {
 						onResumeClaimed: async () =>
@@ -1585,7 +1621,10 @@ export class AgentExecutionOrchestratorService {
 			sessionMode,
 		} = config;
 		const messageContext = this.createN8nChatMessageContext(memory, user.id);
+
 		return this.streamChatResponse({
+			pauseReport: config.pauseReport,
+			hideUserMessageFromTranscript: config.hideUserMessageFromTranscript,
 			admittedExecution: config.admittedExecution,
 			onAdmitted: async () =>
 				await this.integrationMessageContextService.setLatest(
@@ -1667,6 +1706,7 @@ export class AgentExecutionOrchestratorService {
 				principalHash: sandboxPrincipalHash,
 			}),
 			...encodeIntegrationMessageContext(messageContext),
+			...episodicScopeHostMetadata(resourceId, config.episodicScope),
 			...(config.chatSurface !== undefined &&
 			!config.isWakeRun &&
 			!config.hideUserMessageFromTranscript
@@ -1803,6 +1843,9 @@ export class AgentExecutionOrchestratorService {
 		messageContext: IntegrationMessageContext | null,
 	) {
 		const { agentId, message, memory, identity, abortSignal } = config;
+
+		// A wake carries no `episodicScope`: the background job record does not store the
+		// originating turn's decision, so a wake on an integration thread runs without episodic memory.
 		return this.streamChatResponse({
 			access,
 			messageContext,
@@ -1827,7 +1870,7 @@ export class AgentExecutionOrchestratorService {
 			isWakeRun: true,
 			pauseReport: config.pauseReport,
 			sessionMode: 'existing',
-			backgroundJobSignal: config.backgroundJobSignal,
+			backgroundJobSignal: config.pauseReport ? undefined : config.backgroundJobSignal,
 		});
 	}
 }

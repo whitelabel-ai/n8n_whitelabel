@@ -34,8 +34,8 @@ export type FindWorkflowsForUserOptions = {
 	includePinnedData?: boolean;
 	includeTags?: boolean;
 	includeProjects?: boolean;
-	includeParentFolder?: boolean;
 	includeActiveVersion?: boolean;
+	includeParentFolder?: boolean;
 };
 
 @Service()
@@ -188,9 +188,10 @@ export class WorkflowFinderService {
 		workflowIds: string[],
 		user: AuthPrincipal & Pick<User, 'id'>,
 		scopes: Scope[],
+		projectId?: string,
 	): Promise<Set<string>> {
 		if (workflowIds.length === 0) return new Set();
-		const where = await this.findAllWhere(user, scopes);
+		const where = await this.findAllWhere(user, scopes, undefined, projectId);
 
 		const found = new Set<string>();
 		for (const chunk of chunkIds(workflowIds)) {
@@ -456,8 +457,8 @@ export class WorkflowFinderService {
 			includePinnedData = false,
 			includeTags = false,
 			includeProjects = false,
-			includeParentFolder = false,
 			includeActiveVersion = false,
+			includeParentFolder = false,
 		} = options;
 		const { name, active, tagNames, folderId, projectId } = filters;
 
@@ -490,10 +491,10 @@ export class WorkflowFinderService {
 			// ListQuery select keys: `ownedBy` = share rows + project relation (nested);
 			// `shared` = share rows only without project relation.
 			...(includeProjects ? { ownedBy: true } : { shared: true }),
-			...(includeParentFolder && { parentFolder: true }),
 			...(includeActiveVersion && { activeVersion: true }),
 			...(includePinnedData && { pinData: true }),
 			...(includeTags && { tags: true }),
+			...(includeParentFolder && { parentFolder: true }),
 		};
 
 		const { workflows, count } = await this.workflowRepository.getManyAndCountWithSharingSubquery(

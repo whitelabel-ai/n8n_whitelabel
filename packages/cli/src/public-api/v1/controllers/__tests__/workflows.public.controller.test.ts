@@ -40,6 +40,7 @@ describe('WorkflowsPublicController', () => {
 			globalConfig,
 			mock(), // tagService
 			mock(), // redactionEnforcementService
+			mock(), // workflowDependencyQueryService
 		);
 	});
 
